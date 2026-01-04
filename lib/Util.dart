@@ -1,11 +1,10 @@
-import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
 
-class Util{
-  static var IOS_BYTES_OFFSET = 28;
+class Util {
+  static var iosBytesOffset = 28;
   static img.Image convertBGRA8888ToImage(CameraImage cameraImage) {
     final plane = cameraImage.planes[0];
 
@@ -14,7 +13,7 @@ class Util{
       height: cameraImage.height,
       bytes: plane.bytes.buffer,
       rowStride: plane.bytesPerRow,
-      bytesOffset: IOS_BYTES_OFFSET,
+      bytesOffset: iosBytesOffset,
       order: img.ChannelOrder.bgra,
     );
   }
@@ -42,20 +41,33 @@ class Util{
         int g = (y1192 - 833 * v - 400 * u);
         int b = (y1192 + 2066 * u);
 
-        if (r < 0)
+        if (r < 0) {
           r = 0;
-        else if (r > 262143) r = 262143;
-        if (g < 0)
+        } else if (r > 262143) {
+          r = 262143;
+        }
+
+        if (g < 0) {
           g = 0;
-        else if (g > 262143) g = 262143;
-        if (b < 0)
+        } else if (g > 262143) {
+          g = 262143;
+        }
+
+        if (b < 0) {
           b = 0;
-        else if (b > 262143) b = 262143;
+        } else if (b > 262143) {
+          b = 262143;
+        }
 
         // I don't know how these r, g, b values are defined, I'm just copying what you had bellow and
         // getting their 8-bit values.
-        outImg.setPixelRgb(i, j, ((r << 6) & 0xff0000) >> 16,
-            ((g >> 2) & 0xff00) >> 8, (b >> 10) & 0xff);
+        outImg.setPixelRgb(
+          i,
+          j,
+          ((r << 6) & 0xff0000) >> 16,
+          ((g >> 2) & 0xff00) >> 8,
+          (b >> 10) & 0xff,
+        );
       }
     }
     return outImg;
@@ -101,9 +113,8 @@ class Util{
     b = b.clamp(0, 255);
 
     return 0xff000000 |
-    ((b << 16) & 0xff0000) |
-    ((g << 8) & 0xff00) |
-    (r & 0xff);
+        ((b << 16) & 0xff0000) |
+        ((g << 8) & 0xff00) |
+        (r & 0xff);
   }
-
 }
