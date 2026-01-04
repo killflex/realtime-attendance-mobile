@@ -1,5 +1,5 @@
 import 'dart:io';
-import 'dart:nativewrappers/_internal/vm/lib/math_patch.dart';
+import 'dart:math';
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
@@ -30,7 +30,7 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
   late img.Image croppedFace;
   img.Image? image;
   CameraLensDirection camDirec = CameraLensDirection.front;
-  dynamic _scanResults;
+  List<Face>? _scanResults;
   CameraImage? frame;
 
   //TODO declare face detector
@@ -43,14 +43,14 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
   int _validFrameCount = 0;
   final int _requiredValidFrames = 3;
 
-  List<String> faceAngles = ["straight", "left", "right", "up", "down"];
+  List<String> faceAngles = ["straight", "right", "left", "down", "up"];
 
   final Map<String, IconData> angleIcons = {
     "straight": Icons.face,
-    "left": Icons.rotate_left,
-    "right": Icons.rotate_right,
-    "up": Icons.arrow_upward,
-    "down": Icons.arrow_downward,
+    "right": Icons.keyboard_double_arrow_right_rounded,
+    "left": Icons.keyboard_double_arrow_left_rounded,
+    "down": Icons.keyboard_double_arrow_down_rounded,
+    "up": Icons.keyboard_double_arrow_up_rounded,
   };
 
   bool getEmb = false;
@@ -62,10 +62,10 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
 
   List<String> positionInstructions = [
     "Look straight into the camera",
-    "Tilt your head slightly to the left",
     "Tilt your head slightly to the right",
-    "Look up",
+    "Tilt your head slightly to the left",
     "Look down",
+    "Look up",
   ];
 
   bool dialogShown = false;
@@ -142,13 +142,13 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
             face.headEulerAngleX!.abs() < 10 &&
             face.boundingBox.width > 80;
       case 1: // left
-        return face.headEulerAngleY! < -15;
+        return face.headEulerAngleY! < -20; // More lenient
       case 2: // right
-        return face.headEulerAngleY! > 15;
-      case 3: // up
+        return face.headEulerAngleY! > 20; // More lenient
+      case 3: // up - very lenient, just a slight upward tilt
         return face.headEulerAngleX! < -15;
-      case 4: // down
-        return face.headEulerAngleX! > 15;
+      case 4: // down - more lenient and natural
+        return face.headEulerAngleX! > 10;
       default:
         return false;
     }
@@ -169,7 +169,12 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
 
     //TODO pass InputImage to face detection model and detect faces
     List<Face> faces = await faceDetector.processImage(inputImage);
-    // _scanResults = faces;
+
+    if (mounted) {
+      setState(() {
+        _scanResults = faces;
+      });
+    }
 
     if (faces.isNotEmpty && _isFaceProperlyAligned(faces[0], _currentStep)) {
       final tempImage =
@@ -188,7 +193,10 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
         height: faces[0].boundingBox.height.toInt(),
       );
 
-      if (_isFaceSharp(cropped)) {
+      // Create a copy for sharpness check to avoid modifying the original
+      final croppedCopy = img.copyResize(cropped, width: cropped.width);
+
+      if (_isFaceSharp(croppedCopy)) {
         _validFrameCount++;
         if (_validFrameCount >= _requiredValidFrames && !getEmb) {
           getEmb = true;
@@ -208,19 +216,17 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
   void performFaceRecognition(Face face, img.Image cropped) async {
     recognitions.clear();
 
-    image =
-        Platform.isIOS
-            ? Util.convertBGRA8888ToImage(frame!)
-            : Util.convertNV21(frame!);
-    image = img.copyRotate(
-      image!,
-      angle: camDirec == CameraLensDirection.front ? 270 : 90,
-    );
-
-    frontFace ??= croppedFace;
+    // Store the first face (straight) as the profile image
+    if (_currentStep == 0) {
+      frontFace = cropped;
+    }
 
     Recognition recognition = recognizer.recognize(cropped, face.boundingBox);
     embeddings.add(recognition.embeddings);
+
+    print(
+      'Captured embedding ${embeddings.length}/${faceAngles.length} for ${faceAngles[_currentStep]}',
+    );
 
     if (!mounted) return;
 
@@ -234,7 +240,6 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
       }
       isBusy = false;
       getEmb = false;
-      _scanResults = recognitions;
     });
   }
 
@@ -278,6 +283,15 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
                             fontWeight: FontWeight.bold,
                           ),
                         ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Captured ${embeddings.length} angles',
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            color: Colors.white70,
+                          ),
+                        ),
                         const SizedBox(height: 20),
                         ClipRRect(
                           borderRadius: BorderRadius.circular(100),
@@ -308,16 +322,38 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
                           width: double.infinity,
                           child: ElevatedButton.icon(
                             onPressed: () {
+                              if (textEditingController.text.trim().isEmpty) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content: Text("Please enter a name"),
+                                    backgroundColor: Colors.red,
+                                  ),
+                                );
+                                return;
+                              }
+
                               recognizer.registerFaceInDB(
                                 textEditingController.text.trim(),
                                 embeddings,
                                 Uint8List.fromList(img.encodeBmp(croppedFace)),
                               );
-                              Navigator.pop(context);
+
+                              // Reset state
+                              _currentStep = 0;
+                              embeddings.clear();
+                              frontFace = null;
+                              dialogShown = false;
+                              textEditingController.clear();
+
                               Navigator.pop(context); // Close dialog
+                              Navigator.pop(context); // Go back to home
+
                               ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text("Face Registered"),
+                                SnackBar(
+                                  content: Text(
+                                    "Face Registered with ${embeddings.length} angles!",
+                                  ),
+                                  backgroundColor: Colors.green,
                                 ),
                               );
                             },
@@ -484,7 +520,7 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
 
     CustomPainter painter = FaceDetectorPainter(
       cameraPreviewSize,
-      _scanResults,
+      _scanResults!,
       camDirec,
       displayedSize,
       screenSize,
@@ -544,6 +580,78 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
       );
     }
 
+    // Progress indicator for multi-angle capture
+    if (_currentStep < faceAngles.length) {
+      stackChildren.add(
+        Positioned(
+          top: 60,
+          left: 0,
+          right: 0,
+          child: Column(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(15),
+                child: BackdropFilter(
+                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 40),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.deepPurple.withValues(alpha: .3),
+                      borderRadius: BorderRadius.circular(15),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: .2),
+                      ),
+                    ),
+                    child: Column(
+                      children: [
+                        Icon(
+                          angleIcons[faceAngles[_currentStep]],
+                          color: Colors.white,
+                          size: 40,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          positionInstructions[_currentStep],
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: List.generate(
+                            faceAngles.length,
+                            (index) => Container(
+                              margin: const EdgeInsets.symmetric(horizontal: 4),
+                              width: 12,
+                              height: 12,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color:
+                                    index < _currentStep
+                                        ? Colors.green
+                                        : index == _currentStep
+                                        ? Colors.white
+                                        : Colors.white.withValues(alpha: .3),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
     //TODO View for displaying the bar to switch camera direction or for registering faces
     stackChildren.add(
       Positioned(
@@ -587,7 +695,13 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
                       iconSize: 40,
                       color: Colors.black,
                       onPressed: () {
-                        register = true;
+                        // Reset and start registration
+                        setState(() {
+                          _currentStep = 0;
+                          embeddings.clear();
+                          frontFace = null;
+                          dialogShown = false;
+                        });
                       },
                     ),
                   ),

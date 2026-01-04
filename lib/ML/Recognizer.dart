@@ -43,19 +43,17 @@ class Recognizer {
       //  debugPrint(row.toString());
       print(row[DatabaseHelper.columnName]);
       String name = row[DatabaseHelper.columnName];
+      String embeddingJson = row[DatabaseHelper.columnEmbedding];
+
+      // Parse JSON array of embeddings (multiple angles)
+      List<dynamic> parsedJson = jsonDecode(embeddingJson);
       List<List<double>> embd =
-          row[DatabaseHelper.columnEmbedding]
-              .split(',')
-              .map((e) => double.parse(e))
-              .toList()
-              .cast<double>();
-      Recognition recognition = Recognition(
-        row[DatabaseHelper.columnName],
-        Rect.zero,
-        embd,
-        0,
-      );
+          parsedJson
+              .map((e) => (e as List<dynamic>).map((v) => v as double).toList())
+              .toList();
+
       registered[name] = embd;
+      print('Loaded ${embd.length} embeddings for $name');
     }
   }
 
@@ -166,17 +164,24 @@ class Recognizer {
     for (MapEntry<String, List<List<double>>> entry in registered.entries) {
       final String name = entry.key;
       final List<List<double>> storedEmbeddings = entry.value;
-      double dot = 0;
 
-      for (int i = 0; i < emb.length; i++) {
-        double diff = emb[i] - storedEmbeddings[i];
-        dot += diff * diff;
+      // Compare against all stored embeddings (multiple angles) and use the best match
+      double minDistance = double.infinity;
+      for (List<double> storedEmb in storedEmbeddings) {
+        double dot = 0;
+        for (int i = 0; i < emb.length; i++) {
+          double diff = emb[i] - storedEmb[i];
+          dot += diff * diff;
+        }
+        double similarity = sqrt(dot); // Euclidean distance
+
+        if (similarity < minDistance) {
+          minDistance = similarity;
+        }
       }
 
-      double similarity = sqrt(dot); // Euclidean distance
-
-      if (pair.distance == -5 || similarity < pair.distance) {
-        pair.distance = similarity;
+      if (pair.distance == -5 || minDistance < pair.distance) {
+        pair.distance = minDistance;
         pair.name = name;
       }
     }
