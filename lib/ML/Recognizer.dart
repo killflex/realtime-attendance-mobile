@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -15,9 +16,8 @@ class Recognizer {
   static const int inputHeight = 160;
   static const int outputSize = 512;
   final dbHelper = DatabaseHelper();
-  Map<String, Recognition> registered = {};
+  Map<String, List<List<double>>> registered = {};
 
-  @override
   String get modelName => 'assets/facenet.tflite';
 
   Recognizer({int? numThreads}) {
@@ -36,13 +36,14 @@ class Recognizer {
   }
 
   void loadRegisteredFaces() async {
+    registered.clear();
     final allRows = await dbHelper.queryAllRows();
     // debugPrint('query all rows:');
     for (final row in allRows) {
       //  debugPrint(row.toString());
       print(row[DatabaseHelper.columnName]);
       String name = row[DatabaseHelper.columnName];
-      List<double> embd =
+      List<List<double>> embd =
           row[DatabaseHelper.columnEmbedding]
               .split(',')
               .map((e) => double.parse(e))
@@ -54,7 +55,7 @@ class Recognizer {
         embd,
         0,
       );
-      registered.putIfAbsent(name, () => recognition);
+      registered[name] = embd;
     }
   }
 
@@ -81,17 +82,21 @@ class Recognizer {
 
   void registerFaceInDB(
     String name,
-    List<double> embedding,
+    List<List<double>> embeddings,
     Uint8List faceImage,
   ) async {
+    String embeddingJson = jsonEncode(embeddings);
     Uint8List compressedImage = await compressImage(faceImage);
     Map<String, dynamic> row = {
       DatabaseHelper.columnName: name,
-      DatabaseHelper.columnEmbedding: embedding.join(","),
+      DatabaseHelper.columnEmbedding: embeddingJson,
       'image': compressedImage,
     };
+
     final id = await dbHelper.insert(row);
     print('inserted row id: $id');
+
+    loadRegisteredFaces();
   }
 
   Future<void> loadModel() async {
@@ -158,13 +163,13 @@ class Recognizer {
   //TODO  looks for the nearest embeeding in the database and returns the pair which contain information of registered face with which face is most similar
   Pair findNearest(List<double> emb) {
     Pair pair = Pair("Unknown", -5);
-    for (MapEntry<String, Recognition> item in registered.entries) {
-      final String name = item.key;
-      List<double> knownEmb = item.value.embeddings;
+    for (MapEntry<String, List<List<double>>> entry in registered.entries) {
+      final String name = entry.key;
+      final List<List<double>> storedEmbeddings = entry.value;
       double dot = 0;
 
       for (int i = 0; i < emb.length; i++) {
-        double diff = emb[i] - knownEmb[i];
+        double diff = emb[i] - storedEmbeddings[i];
         dot += diff * diff;
       }
 

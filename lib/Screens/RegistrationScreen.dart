@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:nativewrappers/_internal/vm/lib/math_patch.dart';
 import 'dart:ui';
 
 import 'package:camera/camera.dart';
@@ -7,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:image/image.dart' as img;
 import 'package:realtime_attendance_mobile/ML/Recognizer.dart';
+import 'package:realtime_attendance_mobile/Screens/HomeScreen.dart';
 import 'package:realtime_attendance_mobile/Util.dart';
 
 import '../ML/Recognition.dart';
@@ -25,13 +27,49 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
   late Size size;
   late CameraDescription description = cameras[1];
   late List<Recognition> recognitions = [];
+  late img.Image croppedFace;
+  img.Image? image;
   CameraLensDirection camDirec = CameraLensDirection.front;
+  dynamic _scanResults;
+  CameraImage? frame;
 
   //TODO declare face detector
   late FaceDetector faceDetector;
 
   //TODO declare face recognizer
   late Recognizer recognizer;
+
+  int _currentStep = 0;
+  int _validFrameCount = 0;
+  final int _requiredValidFrames = 3;
+
+  List<String> faceAngles = ["straight", "left", "right", "up", "down"];
+
+  final Map<String, IconData> angleIcons = {
+    "straight": Icons.face,
+    "left": Icons.rotate_left,
+    "right": Icons.rotate_right,
+    "up": Icons.arrow_upward,
+    "down": Icons.arrow_downward,
+  };
+
+  bool getEmb = false;
+  img.Image? frontFace;
+
+  List<List<double>> embeddings = [];
+
+  int registrationStep = 0;
+
+  List<String> positionInstructions = [
+    "Look straight into the camera",
+    "Tilt your head slightly to the left",
+    "Tilt your head slightly to the right",
+    "Look up",
+    "Look down",
+  ];
+
+  bool dialogShown = false;
+  bool register = false;
 
   @override
   void initState() {
@@ -84,9 +122,39 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
     super.dispose();
   }
 
+  bool _isFaceSharp(img.Image faceImage) {
+    final grayImage = img.grayscale(faceImage);
+    final laplacianImage = img.sobel(grayImage);
+    final pixels = laplacianImage.getBytes();
+
+    double mean = pixels.reduce((a, b) => a + b) / pixels.length;
+    double variance =
+        pixels.map((p) => pow(p - mean, 2)).reduce((a, b) => a + b) /
+        pixels.length;
+
+    return variance > 1500; // Threshold for sharpness
+  }
+
+  bool _isFaceProperlyAligned(Face face, int step) {
+    switch (step) {
+      case 0: // straight
+        return face.headEulerAngleY!.abs() < 10 &&
+            face.headEulerAngleX!.abs() < 10 &&
+            face.boundingBox.width > 80;
+      case 1: // left
+        return face.headEulerAngleY! < -15;
+      case 2: // right
+        return face.headEulerAngleY! > 15;
+      case 3: // up
+        return face.headEulerAngleX! < -15;
+      case 4: // down
+        return face.headEulerAngleX! > 15;
+      default:
+        return false;
+    }
+  }
+
   //TODO face detection on a frame
-  dynamic _scanResults;
-  CameraImage? frame;
   doFaceDetectionOnFrame() async {
     //TODO convert frame into InputImage format
     InputImage? inputImage = getInputImage();
@@ -101,62 +169,80 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
 
     //TODO pass InputImage to face detection model and detect faces
     List<Face> faces = await faceDetector.processImage(inputImage);
-    _scanResults = faces;
-    print(" Detected Faces: ${faces.length} ");
+    // _scanResults = faces;
 
-    //TODO perform face recognition on detected faces
-    performFaceRecognition(faces);
-  }
-
-  img.Image? image;
-  bool register = false;
-  //TODO perform Face Recognition
-  performFaceRecognition(List<Face> faces) async {
-    recognitions.clear();
-
-    if (register) {
-      //TODO convert CameraImage to Image and rotate it so that our frame will be in a portrait
-      image =
+    if (faces.isNotEmpty && _isFaceProperlyAligned(faces[0], _currentStep)) {
+      final tempImage =
           Platform.isIOS
               ? Util.convertBGRA8888ToImage(frame!)
               : Util.convertNV21(frame!);
-      image = img.copyRotate(
-        image!,
+      final rotated = img.copyRotate(
+        tempImage,
         angle: camDirec == CameraLensDirection.front ? 270 : 90,
       );
+      final cropped = img.copyCrop(
+        rotated,
+        x: faces[0].boundingBox.left.toInt(),
+        y: faces[0].boundingBox.top.toInt(),
+        width: faces[0].boundingBox.width.toInt(),
+        height: faces[0].boundingBox.height.toInt(),
+      );
 
-      for (Face face in faces) {
-        Rect faceRect = face.boundingBox;
-        //TODO crop face
-        img.Image croppedFace = img.copyCrop(
-          image!,
-          x: faceRect.left.toInt(),
-          y: faceRect.top.toInt(),
-          width: faceRect.width.toInt(),
-          height: faceRect.height.toInt(),
-        );
-
-        //TODO pass cropped face to face recognition model
-        Recognition recognition = recognizer.recognize(croppedFace, faceRect);
-
-        //TODO show face registration dialogue
-        showFaceRegistrationDialogue(croppedFace, recognition);
+      if (_isFaceSharp(cropped)) {
+        _validFrameCount++;
+        if (_validFrameCount >= _requiredValidFrames && !getEmb) {
+          getEmb = true;
+          _validFrameCount = 0;
+          performFaceRecognition(faces[0], cropped);
+        }
+      } else {
+        _validFrameCount = 0;
       }
-
-      register = false;
+    } else {
+      _validFrameCount = 0;
     }
 
-    if (mounted) {
-      setState(() {
-        isBusy = false;
-        _scanResults = faces;
-      });
-    }
+    isBusy = false;
+  }
+
+  void performFaceRecognition(Face face, img.Image cropped) async {
+    recognitions.clear();
+
+    image =
+        Platform.isIOS
+            ? Util.convertBGRA8888ToImage(frame!)
+            : Util.convertNV21(frame!);
+    image = img.copyRotate(
+      image!,
+      angle: camDirec == CameraLensDirection.front ? 270 : 90,
+    );
+
+    frontFace ??= croppedFace;
+
+    Recognition recognition = recognizer.recognize(cropped, face.boundingBox);
+    embeddings.add(recognition.embeddings);
+
+    if (!mounted) return;
+
+    setState(() {
+      if (_currentStep < faceAngles.length - 1) {
+        _currentStep++;
+      } else {
+        if (!dialogShown) {
+          showFaceRegistrationDialogue(frontFace!);
+        }
+      }
+      isBusy = false;
+      getEmb = false;
+      _scanResults = recognitions;
+    });
   }
 
   //TODO Face Registration Dialogue
   TextEditingController textEditingController = TextEditingController();
-  showFaceRegistrationDialogue(img.Image croppedFace, Recognition recognition) {
+  showFaceRegistrationDialogue(img.Image croppedFace) {
+    dialogShown = true;
+    textEditingController.clear();
     showDialog(
       context: context,
       builder:
@@ -173,9 +259,11 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
                 child: Container(
                   padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(
-                    color: Colors.white.withAlpha(30),
+                    color: Colors.white.withValues(alpha: .1),
                     borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: Colors.white.withAlpha(40)),
+                    border: Border.all(
+                      color: Colors.white.withValues(alpha: .2),
+                    ),
                   ),
                   child: SingleChildScrollView(
                     child: Column(
@@ -222,7 +310,7 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
                             onPressed: () {
                               recognizer.registerFaceInDB(
                                 textEditingController.text.trim(),
-                                recognition.embeddings,
+                                embeddings,
                                 Uint8List.fromList(img.encodeBmp(croppedFace)),
                               );
                               Navigator.pop(context);
@@ -262,6 +350,7 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
     DeviceOrientation.portraitDown: 180,
     DeviceOrientation.landscapeRight: 270,
   };
+
   InputImage? getInputImage() {
     final camera =
         camDirec == CameraLensDirection.front ? cameras[1] : cameras[0];
@@ -304,6 +393,64 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
         format: format,
         bytesPerRow: plane.bytesPerRow,
       ),
+    );
+  }
+
+  void startFaceRegistration() {
+    embeddings.clear();
+    registrationStep = 0;
+    promptForNextPosition();
+  }
+
+  void promptForNextPosition() {
+    if (registrationStep < positionInstructions.length) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(positionInstructions[registrationStep]),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      registrationStep++;
+    } else {
+      // Registration complete
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Face registration complete!")),
+      );
+    }
+  }
+
+  void captureEmbedding(Recognition recognition) {
+    embeddings.add(recognition.embeddings);
+    registrationStep++;
+
+    if (registrationStep < positionInstructions.length) {
+      promptForNextPosition();
+    } else {
+      // All embeddings captured, proceed to save
+      completeRegistration();
+    }
+  }
+
+  void completeRegistration() {
+    recognizer.registerFaceInDB(
+      textEditingController.text,
+      embeddings,
+      Uint8List.fromList(img.encodeBmp(frontFace!)),
+    );
+
+    textEditingController.clear();
+    dialogShown = false;
+    Navigator.pop(context); // Close dialog
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("Face Registered Successfully with Multiple Angles!"),
+      ),
+    );
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(builder: (context) => const HomeScreen()),
     );
   }
 
