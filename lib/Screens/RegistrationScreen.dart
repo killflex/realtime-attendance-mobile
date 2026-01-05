@@ -18,10 +18,34 @@ class RegistrationScreen extends StatefulWidget {
   const RegistrationScreen({super.key});
 
   @override
-  State<RegistrationScreen> createState() => _RecognitionScreenState();
+  State<RegistrationScreen> createState() => _RegistrationScreenState();
 }
 
-class _RecognitionScreenState extends State<RegistrationScreen> {
+class _RegistrationScreenState extends State<RegistrationScreen> {
+  // Page Controller for two-step process
+  final PageController _pageController = PageController();
+  int _currentPage = 0;
+
+  // Form Controllers and State - Step 1
+  final _formKey = GlobalKey<FormState>();
+  final _namaLengkapController = TextEditingController();
+  String? _selectedStatus;
+  String? _selectedUnitType;
+  String? _selectedUnit;
+  final _identityController = TextEditingController();
+  final _phoneController = TextEditingController();
+  final _emailController = TextEditingController();
+
+  // Unit Kerja Data
+  final Map<String, List<String>> _unitKerjaData = {
+    'UPA': ['Bahasa', 'Kewirausahaan', 'Perpustakaan', 'TIK'],
+    'Lembaga': ['LPPM', 'LPMPP'],
+    'Fakultas': ['Ilmu Komputer', 'Ekonomi dan Bisnis', 'Teknik', 'Hukum'],
+  };
+
+  bool _showCautionDialog = true;
+
+  // Camera and Face Recognition - Step 2
   dynamic controller;
   bool isBusy = false;
   late Size size;
@@ -84,8 +108,48 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
     //TODO initialize face recognizer
     recognizer = Recognizer(numThreads: 2);
 
-    //TODO initialize camera footage
-    initializeCamera();
+    // Camera will be initialized when moving to Step 2
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    _namaLengkapController.dispose();
+    _identityController.dispose();
+    _phoneController.dispose();
+    _emailController.dispose();
+    controller?.dispose();
+    super.dispose();
+  }
+
+  // Step 1 Methods - Form Validation and Navigation
+  String _getIdentityLabel() {
+    if (_selectedStatus == 'Mahasiswa') return 'NPM';
+    return 'NIP';
+  }
+
+  void _nextStep() {
+    if (_formKey.currentState!.validate()) {
+      // Initialize camera when moving to Step 2
+      initializeCamera();
+      _pageController.nextPage(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+      setState(() {
+        _currentPage = 1;
+      });
+    }
+  }
+
+  void _previousStep() {
+    _pageController.previousPage(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeInOut,
+    );
+    setState(() {
+      _currentPage = 0;
+    });
   }
 
   //TODO code to initialize the camera feed
@@ -115,13 +179,6 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
     });
   }
 
-  //TODO close all resources
-  @override
-  void dispose() {
-    controller?.dispose();
-    super.dispose();
-  }
-
   bool _isFaceSharp(img.Image faceImage) {
     final grayImage = img.grayscale(faceImage);
     final laplacianImage = img.sobel(grayImage);
@@ -137,17 +194,17 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
 
   bool _isFaceProperlyAligned(Face face, int step) {
     switch (step) {
-      case 0: // straight
+      case 0:
         return face.headEulerAngleY!.abs() < 10 &&
             face.headEulerAngleX!.abs() < 10 &&
             face.boundingBox.width > 80;
-      case 1: // left
-        return face.headEulerAngleY! < -20; // More lenient
-      case 2: // right
-        return face.headEulerAngleY! > 20; // More lenient
-      case 3: // up - very lenient, just a slight upward tilt
+      case 1:
+        return face.headEulerAngleY! < -20;
+      case 2:
+        return face.headEulerAngleY! > 20;
+      case 3:
         return face.headEulerAngleX! < -15;
-      case 4: // down - more lenient and natural
+      case 4:
         return face.headEulerAngleX! > 10;
       default:
         return false;
@@ -247,9 +304,13 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
   TextEditingController textEditingController = TextEditingController();
   showFaceRegistrationDialogue(img.Image croppedFace) {
     dialogShown = true;
-    textEditingController.clear();
+
+    // Use the user data from Step 1
+    String userName = _namaLengkapController.text.trim();
+
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder:
           (ctx) => Dialog(
             backgroundColor: Colors.transparent,
@@ -258,43 +319,41 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
               vertical: 60,
             ),
             child: ClipRRect(
-              borderRadius: BorderRadius.circular(20),
+              borderRadius: BorderRadius.circular(8),
               child: BackdropFilter(
                 filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                 child: Container(
                   padding: const EdgeInsets.all(20),
                   decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: .1),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(
-                      color: Colors.white.withValues(alpha: .2),
-                    ),
+                    color: Colors.white.withValues(alpha: .95),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: const Color(0xFFD1D5DB)),
                   ),
                   child: SingleChildScrollView(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         const Text(
-                          "Register Your Face",
+                          "Confirm Registration",
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             fontSize: 20,
-                            color: Colors.white,
+                            color: Color(0xFF09090b),
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                         const SizedBox(height: 8),
                         Text(
-                          'Captured ${embeddings.length} angles',
+                          'Captured ${embeddings.length} face angles',
                           textAlign: TextAlign.center,
                           style: const TextStyle(
                             fontSize: 14,
-                            color: Colors.white70,
+                            color: Color(0xFF6B7280),
                           ),
                         ),
                         const SizedBox(height: 20),
                         ClipRRect(
-                          borderRadius: BorderRadius.circular(100),
+                          borderRadius: BorderRadius.circular(8),
                           child: Image.memory(
                             Uint8List.fromList(img.encodeBmp(croppedFace)),
                             width: 150,
@@ -303,71 +362,107 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
                           ),
                         ),
                         const SizedBox(height: 20),
-                        TextField(
-                          controller: textEditingController,
-                          style: const TextStyle(color: Colors.white),
-                          decoration: InputDecoration(
-                            hintText: "Enter your name",
-                            hintStyle: const TextStyle(color: Colors.white70),
-                            filled: true,
-                            fillColor: Colors.white.withAlpha(80),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(12),
-                              borderSide: BorderSide.none,
-                            ),
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF9FAFB),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFFE5E7EB)),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildInfoRow('Nama Lengkap', userName),
+                              const SizedBox(height: 8),
+                              _buildInfoRow('Status', _selectedStatus ?? '-'),
+                              const SizedBox(height: 8),
+                              _buildInfoRow('Unit Kerja', _selectedUnit ?? '-'),
+                              const SizedBox(height: 8),
+                              _buildInfoRow(
+                                _getIdentityLabel(),
+                                _identityController.text,
+                              ),
+                              const SizedBox(height: 8),
+                              _buildInfoRow('Phone', _phoneController.text),
+                              const SizedBox(height: 8),
+                              _buildInfoRow('Email', _emailController.text),
+                            ],
                           ),
                         ),
                         const SizedBox(height: 20),
-                        SizedBox(
-                          width: double.infinity,
-                          child: ElevatedButton.icon(
-                            onPressed: () {
-                              if (textEditingController.text.trim().isEmpty) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content: Text("Please enter a name"),
-                                    backgroundColor: Colors.red,
+                        Row(
+                          children: [
+                            Expanded(
+                              child: OutlinedButton(
+                                onPressed: () {
+                                  // Reset and go back
+                                  _currentStep = 0;
+                                  embeddings.clear();
+                                  frontFace = null;
+                                  dialogShown = false;
+                                  Navigator.pop(context);
+                                },
+                                style: OutlinedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 14,
                                   ),
-                                );
-                                return;
-                              }
-
-                              recognizer.registerFaceInDB(
-                                textEditingController.text.trim(),
-                                embeddings,
-                                Uint8List.fromList(img.encodeBmp(croppedFace)),
-                              );
-
-                              // Reset state
-                              _currentStep = 0;
-                              embeddings.clear();
-                              frontFace = null;
-                              dialogShown = false;
-                              textEditingController.clear();
-
-                              Navigator.pop(context); // Close dialog
-                              Navigator.pop(context); // Go back to home
-
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    "Face Registered with ${embeddings.length} angles!",
+                                  side: const BorderSide(
+                                    color: Color(0xFFD1D5DB),
                                   ),
-                                  backgroundColor: Colors.green,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
                                 ),
-                              );
-                            },
-                            icon: const Icon(Icons.check),
-                            label: const Text("Register"),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.deepPurple.shade300,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 14),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
+                                child: const Text(
+                                  "Retake",
+                                  style: TextStyle(color: Color(0xFF09090b)),
+                                ),
                               ),
                             ),
-                          ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: ElevatedButton(
+                                onPressed: () {
+                                  recognizer.registerFaceInDB(
+                                    userName,
+                                    embeddings,
+                                    Uint8List.fromList(
+                                      img.encodeBmp(croppedFace),
+                                    ),
+                                  );
+
+                                  // Reset state
+                                  _currentStep = 0;
+                                  embeddings.clear();
+                                  frontFace = null;
+                                  dialogShown = false;
+
+                                  Navigator.pop(context); // Close dialog
+                                  Navigator.pop(context); // Go back to home
+
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        "Face Registered Successfully!",
+                                      ),
+                                      backgroundColor: Color(0xFF10B981),
+                                    ),
+                                  );
+                                },
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF09090b),
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 14,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
+                                child: const Text("Confirm"),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
@@ -376,6 +471,26 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
               ),
             ),
           ),
+    );
+  }
+
+  Widget _buildInfoRow(String label, String value) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(fontSize: 14, color: Color(0xFF6B7280)),
+        ),
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: Color(0xFF09090b),
+          ),
+        ),
+      ],
     );
   }
 
@@ -546,8 +661,488 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
 
   @override
   Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey[50],
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        elevation: 0,
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Color(0xFF09090b)),
+          onPressed: () {
+            if (_currentPage == 1) {
+              _previousStep();
+            } else {
+              Navigator.pop(context);
+            }
+          },
+        ),
+        title: Text(
+          _currentPage == 0
+              ? 'Registration - User Data'
+              : 'Registration - Face Capture',
+          style: const TextStyle(
+            color: Color(0xFF09090b),
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(1),
+          child: Container(color: const Color(0xFFE5E7EB), height: 1),
+        ),
+      ),
+      body: PageView(
+        controller: _pageController,
+        physics: const NeverScrollableScrollPhysics(),
+        onPageChanged: (page) {
+          setState(() {
+            _currentPage = page;
+          });
+        },
+        children: [_buildStep1(), _buildStep2()],
+      ),
+    );
+  }
+
+  // Step 1: User Data Form
+  Widget _buildStep1() {
+    return SingleChildScrollView(
+      child: Padding(
+        padding: const EdgeInsets.all(20.0),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 8),
+              const Text(
+                'Personal Information',
+                style: TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF09090b),
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'Please fill in your information to proceed with face registration.',
+                style: TextStyle(fontSize: 14, color: Color(0xFF6B7280)),
+              ),
+              const SizedBox(height: 24),
+
+              // Nama Lengkap (Full Name)
+              const Text(
+                'Nama Lengkap',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF09090b),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextFormField(
+                controller: _namaLengkapController,
+                keyboardType: TextInputType.name,
+                textCapitalization: TextCapitalization.words,
+                decoration: InputDecoration(
+                  hintText: 'Enter your full name',
+                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF09090b),
+                      width: 2,
+                    ),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please enter your full name';
+                  }
+                  if (value.length < 3) {
+                    return 'Name must be at least 3 characters';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 20),
+
+              // Status Dropdown
+              const Text(
+                'Status',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF09090b),
+                ),
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                decoration: InputDecoration(
+                  hintText: 'Select your status',
+                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF09090b),
+                      width: 2,
+                    ),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
+                ),
+                items:
+                    ['Dosen', 'Tendik', 'Mahasiswa']
+                        .map(
+                          (status) => DropdownMenuItem(
+                            value: status,
+                            child: Text(status),
+                          ),
+                        )
+                        .toList(),
+                onChanged: (value) {
+                  setState(() {
+                    _selectedStatus = value;
+                    _selectedUnitType = null;
+                    _selectedUnit = null;
+                  });
+                },
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please select your status';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 20),
+
+              // Unit Type Dropdown
+              const Text(
+                'Unit Type',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF09090b),
+                ),
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                decoration: InputDecoration(
+                  hintText: 'Select unit type',
+                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF09090b),
+                      width: 2,
+                    ),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
+                ),
+                items:
+                    ['UPA', 'Lembaga', 'Fakultas']
+                        .map(
+                          (type) =>
+                              DropdownMenuItem(value: type, child: Text(type)),
+                        )
+                        .toList(),
+                onChanged: (value) {
+                  setState(() {
+                    _selectedUnitType = value;
+                    _selectedUnit = null;
+                  });
+                },
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please select unit type';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 20),
+
+              // Cascading Unit Kerja Dropdown
+              if (_selectedUnitType != null) ...[
+                const Text(
+                  'Unit Kerja',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF09090b),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  decoration: InputDecoration(
+                    hintText: 'Select unit kerja',
+                    hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                    filled: true,
+                    fillColor: Colors.white,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      borderSide: const BorderSide(
+                        color: Color(0xFF09090b),
+                        width: 2,
+                      ),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                  ),
+                  items:
+                      _unitKerjaData[_selectedUnitType]!
+                          .map(
+                            (unit) => DropdownMenuItem(
+                              value: unit,
+                              child: Text(unit),
+                            ),
+                          )
+                          .toList(),
+                  onChanged: (value) {
+                    setState(() {
+                      _selectedUnit = value;
+                    });
+                  },
+                  validator: (value) {
+                    if (value == null || value.isEmpty) {
+                      return 'Please select unit kerja';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 20),
+              ],
+
+              // Dynamic Identity Field (NIP/NPM)
+              Text(
+                _getIdentityLabel(),
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF09090b),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextFormField(
+                controller: _identityController,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(
+                  hintText: 'Enter your ${_getIdentityLabel()}',
+                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF09090b),
+                      width: 2,
+                    ),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please enter your ${_getIdentityLabel()}';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 20),
+
+              // Phone Number
+              const Text(
+                'Phone Number',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF09090b),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextFormField(
+                controller: _phoneController,
+                keyboardType: TextInputType.phone,
+                decoration: InputDecoration(
+                  hintText: 'Enter your phone number',
+                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF09090b),
+                      width: 2,
+                    ),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please enter your phone number';
+                  }
+                  if (!RegExp(r'^[0-9]+$').hasMatch(value)) {
+                    return 'Please enter a valid phone number';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 20),
+
+              // Email
+              const Text(
+                'Email',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF09090b),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextFormField(
+                controller: _emailController,
+                keyboardType: TextInputType.emailAddress,
+                decoration: InputDecoration(
+                  hintText: 'Enter your email',
+                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
+                  filled: true,
+                  fillColor: Colors.white,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF09090b),
+                      width: 2,
+                    ),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 14,
+                  ),
+                ),
+                validator: (value) {
+                  if (value == null || value.isEmpty) {
+                    return 'Please enter your email';
+                  }
+                  if (!RegExp(
+                    r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
+                  ).hasMatch(value)) {
+                    return 'Please enter a valid email';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 32),
+
+              // Next Button
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _nextStep,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF09090b),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: const Text(
+                    'Next: Face Capture',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // Step 2: Face Capture
+  Widget _buildStep2() {
     List<Widget> stackChildren = [];
     size = MediaQuery.of(context).size;
+
     if (controller != null) {
       //TODO View for displaying the live camera footage
       stackChildren.add(
@@ -568,7 +1163,7 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
         ),
       );
 
-      //TODO View for displaying rectangles around detected aces
+      //TODO View for displaying rectangles around detected faces
       stackChildren.add(
         Positioned(
           top: 0.0,
@@ -580,6 +1175,13 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
       );
     }
 
+    // Caution Dialog on first entry
+    if (_showCautionDialog) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showCaptureInstructions();
+      });
+    }
+
     // Progress indicator for multi-angle capture
     if (_currentStep < faceAngles.length) {
       stackChildren.add(
@@ -589,61 +1191,67 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
           right: 0,
           child: Column(
             children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(15),
-                child: BackdropFilter(
-                  filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                  child: Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 40),
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: Colors.deepPurple.withValues(alpha: .3),
-                      borderRadius: BorderRadius.circular(15),
-                      border: Border.all(
-                        color: Colors.white.withValues(alpha: .2),
+              Container(
+                margin: const EdgeInsets.symmetric(horizontal: 20),
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: .5),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFE5E7EB)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: .1),
+                      blurRadius: 10,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  children: [
+                    Icon(
+                      angleIcons[faceAngles[_currentStep]],
+                      color: Colors.white,
+                      size: 40,
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      positionInstructions[_currentStep],
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
-                    child: Column(
-                      children: [
-                        Icon(
-                          angleIcons[faceAngles[_currentStep]],
-                          color: Colors.white,
-                          size: 40,
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          positionInstructions[_currentStep],
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 12),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: List.generate(
-                            faceAngles.length,
-                            (index) => Container(
-                              margin: const EdgeInsets.symmetric(horizontal: 4),
-                              width: 12,
-                              height: 12,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color:
-                                    index < _currentStep
-                                        ? Colors.green
-                                        : index == _currentStep
-                                        ? Colors.white
-                                        : Colors.white.withValues(alpha: .3),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(
+                        faceAngles.length,
+                        (index) => Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          width: 12,
+                          height: 12,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color:
+                                index < _currentStep
+                                    ? const Color(0xFF10B981)
+                                    : index == _currentStep
+                                    ? Colors.white
+                                    : const Color(0xFFD1D5DB),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: .1),
+                                blurRadius: 10,
+                                offset: const Offset(0, 4),
                               ),
-                            ),
+                            ],
                           ),
                         ),
-                      ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
               ),
             ],
@@ -658,70 +1266,185 @@ class _RecognitionScreenState extends State<RegistrationScreen> {
         bottom: 40,
         left: 20,
         right: 20,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(20),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.deepPurple.withAlpha(80),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white.withValues(alpha: .2)),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: .5),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.max,
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.cached, color: Colors.white),
+                iconSize: 40,
+                onPressed: () {
+                  _toggleCameraDirection();
+                },
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.max,
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 300),
-                    child: IconButton(
-                      icon: Icon(Icons.cached, color: Colors.white),
-                      iconSize: 40,
-                      color: Colors.black,
-                      onPressed: () {
-                        _toggleCameraDirection();
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 300),
-                    child: IconButton(
-                      icon: Icon(
-                        Icons.face_retouching_natural,
-                        color: Colors.white,
-                      ),
-                      iconSize: 40,
-                      color: Colors.black,
-                      onPressed: () {
-                        // Reset and start registration
-                        setState(() {
-                          _currentStep = 0;
-                          embeddings.clear();
-                          frontFace = null;
-                          dialogShown = false;
-                        });
-                      },
-                    ),
-                  ),
-                ],
+              const SizedBox(height: 10),
+              IconButton(
+                icon: const Icon(
+                  Icons.face_retouching_natural,
+                  color: Colors.white,
+                ),
+                iconSize: 40,
+                onPressed: () {
+                  // Reset and start registration
+                  setState(() {
+                    _currentStep = 0;
+                    embeddings.clear();
+                    frontFace = null;
+                    dialogShown = false;
+                  });
+                },
               ),
-            ),
+            ],
           ),
         ),
       ),
     );
 
     return SafeArea(
-      child: Scaffold(
-        backgroundColor: Colors.black,
-        body: Container(
-          margin: const EdgeInsets.only(top: 0),
-          color: Colors.black,
-          child: Stack(children: stackChildren),
-        ),
+      child: Container(
+        color: Colors.black,
+        child: Stack(children: stackChildren),
       ),
+    );
+  }
+
+  void _showCaptureInstructions() {
+    if (!_showCautionDialog) return;
+
+    setState(() {
+      _showCautionDialog = false;
+    });
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder:
+          (context) => Dialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: const Color(0xFFE5E7EB)),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFEF3C7),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.warning_amber_rounded,
+                      color: Color(0xFFF59E0B),
+                      size: 40,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Important Instructions',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      color: Color(0xFF09090b),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF9FAFB),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFE5E7EB)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _buildInstructionItem(
+                          Icons.visibility_off,
+                          'Remove glasses if wearing any',
+                        ),
+                        const SizedBox(height: 12),
+                        _buildInstructionItem(
+                          Icons.wb_sunny_outlined,
+                          'Ensure good lighting on your face',
+                        ),
+                        const SizedBox(height: 12),
+                        _buildInstructionItem(
+                          Icons.face,
+                          'Follow the on-screen position instructions',
+                        ),
+                        const SizedBox(height: 12),
+                        _buildInstructionItem(
+                          Icons.camera_alt,
+                          'Capture 5 different face angles',
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(context);
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF09090b),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        elevation: 0,
+                      ),
+                      child: const Text(
+                        'Start Capture',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+    );
+  }
+
+  Widget _buildInstructionItem(IconData icon, String text) {
+    return Row(
+      children: [
+        Container(
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: const Color(0xFF09090b),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(icon, color: Colors.white, size: 20),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(fontSize: 14, color: Color(0xFF374151)),
+          ),
+        ),
+      ],
     );
   }
 }

@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:ui';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -302,35 +301,32 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
         bottom: 40,
         left: 20,
         right: 20,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(20),
-          child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-            child: Container(
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                color: Colors.deepPurple.withAlpha(80),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: Colors.white.withValues(alpha: .2)),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.white.withValues(alpha: .5),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: .1),
+                blurRadius: 10,
+                offset: const Offset(0, 4),
               ),
-              child: Row(
-                mainAxisSize: MainAxisSize.max,
-                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                children: [
-                  AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 300),
-                    child: IconButton(
-                      icon: Icon(Icons.cached, color: Colors.white),
-                      iconSize: 40,
-                      color: Colors.black,
-                      onPressed: () {
-                        _toggleCameraDirection();
-                      },
-                    ),
-                  ),
-                ],
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.max,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.cached, color: Colors.white),
+                iconSize: 40,
+                onPressed: () {
+                  _toggleCameraDirection();
+                },
               ),
-            ),
+            ],
           ),
         ),
       ),
@@ -378,12 +374,12 @@ class FaceDetectorPainter extends CustomPainter {
         Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2.5
-          ..color = Colors.deepPurple.shade300;
+          ..color = const Color(0xFF10B981);
 
     final Paint labelBgPaint =
         Paint()
           ..style = PaintingStyle.fill
-          ..color = Colors.deepPurple.shade300.withAlpha(150);
+          ..color = const Color(0xFF09090b).withValues(alpha: .9);
 
     for (final face in faces) {
       final double left =

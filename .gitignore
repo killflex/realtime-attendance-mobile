@@ -117,3 +117,6 @@ coverage/
 # ML Models (optional - uncomment if you want to exclude large model files)
 *.tflite
 *.mlmodel
+
+# Documents
+docs/
