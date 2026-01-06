@@ -829,7 +829,12 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                 onChanged: (value) {
                   setState(() {
                     _selectedStatus = value;
-                    _selectedUnitType = null;
+                    // Auto-select Fakultas for Mahasiswa
+                    if (value == 'Mahasiswa') {
+                      _selectedUnitType = 'Fakultas';
+                    } else {
+                      _selectedUnitType = null;
+                    }
                     _selectedUnit = null;
                   });
                 },
@@ -853,6 +858,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
               ),
               const SizedBox(height: 8),
               DropdownButtonFormField<String>(
+                value: _selectedUnitType,
                 decoration: InputDecoration(
                   hintText: 'Select unit type',
                   hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
@@ -879,7 +885,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                   ),
                 ),
                 items:
-                    ['UPA', 'Lembaga', 'Fakultas']
+                    (_selectedStatus == 'Mahasiswa'
+                            ? ['Fakultas']
+                            : ['UPA', 'Lembaga', 'Fakultas'])
                         .map(
                           (type) =>
                               DropdownMenuItem(value: type, child: Text(type)),
