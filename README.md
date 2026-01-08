@@ -1,16 +1,45 @@
-# realtime_face_recognition_2026
+# Realtime Attendance Mobile
 
-A new Flutter project.
+A Flutter mobile application for real-time face recognition-based attendance tracking.
 
-## Getting Started
+## Features
 
-This project is a starting point for a Flutter application.
+- Face registration and storage
+- Real-time face detection and recognition
+- Local database for storing registered faces
+- Camera integration for live recognition
+- View and manage registered faces
 
-A few resources to get you started if this is your first Flutter project:
+## Technology Stack
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+- Flutter SDK 3.7.0+
+- FaceNet TFLite model for face embeddings
+- Google ML Kit for face detection
+- SQLite for local data persistence
+- Camera integration
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Setup
+
+1. Clone the repository
+2. Install dependencies:
+   ```bash
+   flutter pub get
+   ```
+3. Run the application:
+   ```bash
+   flutter run
+   ```
+
+## Project Structure
+
+- `lib/Screens` - UI screens (Home, Registration, Recognition, Registered Faces)
+- `lib/ML` - Machine learning components (Recognizer, Recognition models)
+- `lib/DB` - Database helper for SQLite operations
+- `assets` - FaceNet TFLite model
+
+## Requirements
+
+- Flutter 3.7.0 or higher
+- Android SDK (for Android deployment)
+- iOS development environment (for iOS deployment)
+- Device with camera support
