@@ -38,9 +38,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
     super.initState();
 
     //TODO initialize face detector
-    final options = FaceDetectorOptions(
-      performanceMode: FaceDetectorMode.accurate,
-    );
+    final options = FaceDetectorOptions(performanceMode: FaceDetectorMode.fast);
     faceDetector = FaceDetector(options: options);
 
     //TODO initialize face recognizer
