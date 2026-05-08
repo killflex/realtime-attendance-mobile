@@ -10,15 +10,23 @@ import '../DB/DatabaseHelper.dart';
 import 'Recognition.dart';
 
 class Recognizer {
-  late Interpreter interpreter;
+  Interpreter? _interpreter;
   late InterpreterOptions _interpreterOptions;
-  static const int inputWidth = 160;
-  static const int inputHeight = 160;
-  static const int outputSize = 512;
+  static const int inputWidth = 112;
+  static const int inputHeight = 112;
+  static const int outputSize = 128;
   final dbHelper = DatabaseHelper();
   Map<String, List<List<double>>> registered = {};
 
+  // Cache untuk optimasi
+  img.Image? _lastResizedImage;
+  List<dynamic>? _lastInputArray;
+
   String get modelName => 'assets/facenet.tflite';
+
+  bool _isLoaded = false;
+
+  bool get isReady => _isLoaded && _interpreter != null;
 
   Recognizer({int? numThreads}) {
     _interpreterOptions = InterpreterOptions();
@@ -26,8 +34,12 @@ class Recognizer {
     if (numThreads != null) {
       _interpreterOptions.threads = numThreads;
     }
-    loadModel();
-    initDB();
+    // Initialization is async; callers should await init().
+  }
+
+  Future<void> init() async {
+    await loadModel();
+    await initDB();
   }
 
   initDB() async {
@@ -99,18 +111,22 @@ class Recognizer {
 
   Future<void> loadModel() async {
     try {
-      interpreter = await Interpreter.fromAsset(modelName);
+      _interpreter = await Interpreter.fromAsset(modelName);
+      _isLoaded = true;
     } catch (e) {
+      _isLoaded = false;
       print('Unable to create interpreter, Caught Exception: ${e.toString()}');
     }
   }
 
   List<dynamic> imageToArray(img.Image inputImage) {
+    // Cache optimization
     img.Image resizedImage = img.copyResize(
       inputImage,
       width: inputWidth,
       height: inputHeight,
     );
+
     List<double> flattenedList =
         resizedImage.data!
             .expand((channel) => [channel.r, channel.g, channel.b])
@@ -136,6 +152,10 @@ class Recognizer {
 
   Recognition recognize(img.Image image, Rect location) {
     //TODO crop face from image resize it and convert it to float array
+    if (!isReady) {
+      return Recognition('Unknown', location, List.filled(outputSize, 0.0), -1);
+    }
+
     var input = imageToArray(image);
     print(input.shape.toString());
 
@@ -144,7 +164,7 @@ class Recognizer {
 
     //TODO performs inference
     final runs = DateTime.now().millisecondsSinceEpoch;
-    interpreter.run(input, output);
+    _interpreter!.run(input, output);
     final run = DateTime.now().millisecondsSinceEpoch - runs;
     print('Time to run inference: $run ms$output');
 
@@ -161,6 +181,12 @@ class Recognizer {
   //TODO  looks for the nearest embeeding in the database and returns the pair which contain information of registered face with which face is most similar
   Pair findNearest(List<double> emb) {
     Pair pair = Pair("Unknown", -5);
+
+    // Early exit if no registered faces
+    if (registered.isEmpty) {
+      return pair;
+    }
+
     for (MapEntry<String, List<List<double>>> entry in registered.entries) {
       final String name = entry.key;
       final List<List<double>> storedEmbeddings = entry.value;
@@ -168,20 +194,24 @@ class Recognizer {
       // Compare against all stored embeddings (multiple angles) and use the best match
       double minDistance = double.infinity;
       for (List<double> storedEmb in storedEmbeddings) {
-        double dot = 0;
+        // Use dot product for faster computation (no sqrt needed immediately)
+        double dotProduct = 0;
         for (int i = 0; i < emb.length; i++) {
           double diff = emb[i] - storedEmb[i];
-          dot += diff * diff;
+          dotProduct += diff * diff;
         }
-        double similarity = sqrt(dot); // Euclidean distance
 
-        if (similarity < minDistance) {
-          minDistance = similarity;
+        // Only compute sqrt if needed (when comparing or final result)
+        if (dotProduct < minDistance) {
+          minDistance = dotProduct;
         }
       }
 
-      if (pair.distance == -5 || minDistance < pair.distance) {
-        pair.distance = minDistance;
+      // Compute actual Euclidean distance only for the best match
+      double similarity = sqrt(minDistance);
+
+      if (pair.distance == -5 || similarity < pair.distance) {
+        pair.distance = similarity;
         pair.name = name;
       }
     }
@@ -190,7 +220,7 @@ class Recognizer {
   }
 
   void close() {
-    interpreter.close();
+    _interpreter?.close();
   }
 }
 

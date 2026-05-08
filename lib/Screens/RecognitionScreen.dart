@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:camera/camera.dart';
@@ -19,11 +20,11 @@ class RecognitionScreen extends StatefulWidget {
 }
 
 class _RecognitionScreenState extends State<RecognitionScreen> {
-  dynamic controller;
+  CameraController? controller;
   bool isBusy = false;
   late Size size;
-  late CameraDescription description = cameras[1];
-  late List<Recognition> recognitions = [];
+  late CameraDescription description;
+  List<Recognition> recognitions = [];
   CameraLensDirection camDirec = CameraLensDirection.front;
 
   //TODO declare face detector
@@ -31,125 +32,278 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
 
   //TODO declare face recognizer
   late Recognizer recognizer;
+  bool _recognizerReady = false;
+
+  // Performance optimization
+  DateTime? _lastProcessedTime;
+  static const _processingInterval = Duration(
+    milliseconds: 300,
+  ); // Process every 300ms
+  int _skipFrameCount = 0;
+  static const _skipFrames = 2; // Skip 2 frames between processing
 
   @override
   void initState() {
     super.initState();
 
+    // Set initial camera description
+    _initializeCameraDescription();
+
     //TODO initialize face detector
-    final options = FaceDetectorOptions(
-      performanceMode: FaceDetectorMode.accurate,
-    );
+    final options = FaceDetectorOptions(performanceMode: FaceDetectorMode.fast);
     faceDetector = FaceDetector(options: options);
 
     //TODO initialize face recognizer
-    recognizer = Recognizer(numThreads: 2);
+    _initRecognizer();
 
     //TODO initialize camera footage
     initializeCamera();
   }
 
+  Future<void> _initRecognizer() async {
+    recognizer = Recognizer(numThreads: 2);
+    await recognizer.init();
+    if (!mounted) return;
+    setState(() {
+      _recognizerReady = recognizer.isReady;
+    });
+  }
+
+  void _initializeCameraDescription() {
+    // Check if cameras are available
+    if (cameras.isEmpty) {
+      print('No cameras available on this device');
+      return;
+    }
+
+    // Find front camera, fallback to back camera, or first available
+    try {
+      description = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.first,
+      );
+      camDirec = description.lensDirection;
+    } catch (e) {
+      print('Error initializing camera: $e');
+      description = cameras.first;
+      camDirec = description.lensDirection;
+    }
+  }
+
   //TODO code to initialize the camera feed
-  initializeCamera() async {
-    controller = CameraController(
-      description,
-      ResolutionPreset.medium,
-      imageFormatGroup:
-          Platform.isAndroid
-              ? ImageFormatGroup
-                  .nv21 // for Android
-              : ImageFormatGroup.bgra8888,
-      enableAudio: false,
-    ); // for iOS);
-    await controller.initialize().then((_) {
+  Future<void> initializeCamera() async {
+    // Check if cameras are available
+    if (cameras.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No cameras available on this device'),
+            backgroundColor: Colors.red,
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      controller = CameraController(
+        description,
+        ResolutionPreset.medium,
+        imageFormatGroup:
+            Platform.isAndroid
+                ? ImageFormatGroup
+                    .nv21 // for Android
+                : ImageFormatGroup.yuv420, // for iOS
+        enableAudio: false,
+      );
+
+      await controller!.initialize();
+
       if (!mounted) {
         return;
       }
-      setState(() {
-        controller;
+
+      setState(() {});
+
+      controller!.startImageStream((image) {
+        if (!isBusy) {
+          // Throttle processing with time-based check
+          final now = DateTime.now();
+          if (_lastProcessedTime == null ||
+              now.difference(_lastProcessedTime!) > _processingInterval) {
+            // Also skip frames for additional performance
+            _skipFrameCount++;
+            if (_skipFrameCount > _skipFrames) {
+              _skipFrameCount = 0;
+              isBusy = true;
+              frame = image;
+              _lastProcessedTime = now;
+              doFaceDetectionOnFrame();
+            }
+          }
+        }
       });
-      controller.startImageStream(
-        (image) => {
-          if (!isBusy) {isBusy = true, frame = image, doFaceDetectionOnFrame()},
-        },
-      );
-    });
+    } catch (e) {
+      print('Error initializing camera: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Camera initialization failed: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    }
   }
 
   //TODO close all resources
   @override
   void dispose() {
     controller?.dispose();
+    faceDetector.close();
+    recognizer.close();
     super.dispose();
   }
 
   //TODO face detection on a frame
-  dynamic _scanResults;
+  List<Recognition>? _scanResults;
   CameraImage? frame;
-  doFaceDetectionOnFrame() async {
-    //TODO convert frame into InputImage format
-    final inputImage = getInputImage();
-    if (inputImage == null) {
+
+  Future<void> doFaceDetectionOnFrame() async {
+    try {
+      //TODO convert frame into InputImage format
+      final inputImage = getInputImage();
+      if (inputImage == null) {
+        if (mounted) {
+          setState(() {
+            isBusy = false;
+          });
+        }
+        return;
+      }
+
+      //TODO pass InputImage to face detection model and detect faces
+      final faces = await faceDetector.processImage(inputImage);
+      print(" Detected Faces: ${faces.length} ");
+
+      //TODO perform face recognition on detected faces
+      await performFaceRecognition(faces);
+    } catch (e) {
+      print('Error in face detection: $e');
       if (mounted) {
         setState(() {
           isBusy = false;
         });
       }
-      return;
     }
-
-    //TODO pass InputImage to face detection model and detect faces
-    final faces = await faceDetector.processImage(inputImage);
-    print(" Detected Faces: ${faces.length} ");
-
-    //TODO perform face recognition on detected faces
-    performFaceRecognition(faces);
   }
 
   img.Image? image;
   //TODO perform Face Recognition
-  performFaceRecognition(List<Face> faces) async {
-    recognitions.clear();
-
-    //TODO convert CameraImage to Image and rotate it so that our frame will be in a portrait
-    image =
-        Platform.isIOS
-            ? Util.convertBGRA8888ToImage(frame!)
-            : Util.convertNV21(frame!);
-    image = img.copyRotate(
-      image!,
-      angle: camDirec == CameraLensDirection.front ? 270 : 90,
-    );
-
-    for (Face face in faces) {
-      Rect faceRect = face.boundingBox;
-      //TODO crop face
-      img.Image croppedFace = img.copyCrop(
-        image!,
-        x: faceRect.left.toInt(),
-        y: faceRect.top.toInt(),
-        width: faceRect.width.toInt(),
-        height: faceRect.height.toInt(),
-      );
-      //TODO pass cropped face to face recognition model
-      Recognition recognition = recognizer.recognize(croppedFace, faceRect);
-
-      if (recognition.distance < 1 && recognition.distance >= 0) {
-        recognitions.add(recognition);
-        print(
-          'Recognized: ${recognition.name} with distance: ${recognition.distance}',
-        );
-      } else {
-        recognition.name = "Unknown";
-        print('Face not recognized. Distance: ${recognition.distance}');
+  Future<void> performFaceRecognition(List<Face> faces) async {
+    try {
+      if (!_recognizerReady) {
+        if (mounted) {
+          setState(() {
+            isBusy = false;
+          });
+        }
+        return;
       }
-    }
 
-    if (mounted) {
-      setState(() {
-        isBusy = false;
-        _scanResults = recognitions;
-      });
+      recognitions.clear();
+
+      // Limit number of faces to process for better performance
+      final facesToProcess = faces.take(3).toList();
+
+      if (frame == null) {
+        if (mounted) {
+          setState(() {
+            isBusy = false;
+          });
+        }
+        return;
+      }
+
+      //TODO convert CameraImage to Image and rotate it so that our frame will be in a portrait
+      image =
+          Platform.isIOS
+              ? Util.convertBGRA8888ToImage(frame!)
+              : Util.convertNV21(frame!);
+
+      if (image == null) {
+        if (mounted) {
+          setState(() {
+            isBusy = false;
+          });
+        }
+        return;
+      }
+
+      image = img.copyRotate(
+        image!,
+        angle: camDirec == CameraLensDirection.front ? 270 : 90,
+      );
+
+      for (Face face in facesToProcess) {
+        Rect faceRect = face.boundingBox;
+
+        // Validate face rect bounds
+        if (faceRect.left < 0 ||
+            faceRect.top < 0 ||
+            faceRect.right > image!.width ||
+            faceRect.bottom > image!.height) {
+          continue;
+        }
+
+        // Additional validation for crop dimensions
+        if (faceRect.width <= 0 || faceRect.height <= 0) {
+          continue;
+        }
+
+        try {
+          //TODO crop face
+          img.Image croppedFace = img.copyCrop(
+            image!,
+            x: faceRect.left.toInt(),
+            y: faceRect.top.toInt(),
+            width: faceRect.width.toInt(),
+            height: faceRect.height.toInt(),
+          );
+
+          //TODO pass cropped face to face recognition model
+          Recognition recognition = recognizer.recognize(croppedFace, faceRect);
+
+          if (recognition.distance < 1 && recognition.distance >= 0) {
+            recognitions.add(recognition);
+            print(
+              'Recognized: ${recognition.name} with distance: ${recognition.distance}',
+            );
+          } else {
+            recognition.name = "Unknown";
+            print('Face not recognized. Distance: ${recognition.distance}');
+          }
+        } catch (e) {
+          print('Error processing face: $e');
+          continue;
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          isBusy = false;
+          _scanResults = recognitions;
+        });
+      }
+    } catch (e) {
+      print('Error in face recognition: $e');
+      if (mounted) {
+        setState(() {
+          isBusy = false;
+        });
+      }
     }
   }
 
@@ -160,9 +314,15 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
     DeviceOrientation.portraitDown: 180,
     DeviceOrientation.landscapeRight: 270,
   };
+
   InputImage? getInputImage() {
-    final camera =
-        camDirec == CameraLensDirection.front ? cameras[1] : cameras[0];
+    if (controller == null || frame == null) return null;
+
+    // Safe camera selection based on direction
+    final camera = cameras.firstWhere(
+      (cam) => cam.lensDirection == camDirec,
+      orElse: () => description,
+    );
     final sensorOrientation = camera.sensorOrientation;
 
     InputImageRotation? rotation;
@@ -209,15 +369,17 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   Widget buildResult() {
     if (_scanResults == null ||
         controller == null ||
-        !controller.value.isInitialized) {
-      return const Center(child: Text('Camera is not initialized'));
+        !controller!.value.isInitialized) {
+      return const SizedBox.shrink();
+    }
+
+    final previewSize = controller!.value.previewSize;
+    if (previewSize == null) {
+      return const SizedBox.shrink();
     }
 
     // Get the camera preview size (already rotated for portrait)
-    final cameraPreviewSize = Size(
-      controller.value.previewSize!.height,
-      controller.value.previewSize!.width,
-    );
+    final cameraPreviewSize = Size(previewSize.height, previewSize.width);
 
     // Calculate the actual displayed size accounting for BoxFit.cover
     final screenSize = MediaQuery.of(context).size;
@@ -235,7 +397,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
 
     CustomPainter painter = FaceDetectorPainter(
       cameraPreviewSize,
-      _scanResults,
+      _scanResults!,
       camDirec,
       displayedSize,
       screenSize,
@@ -244,46 +406,101 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   }
 
   //TODO toggle camera direction
-  void _toggleCameraDirection() async {
-    if (camDirec == CameraLensDirection.back) {
-      camDirec = CameraLensDirection.front;
-      description = cameras[1];
-    } else {
-      camDirec = CameraLensDirection.back;
-      description = cameras[0];
+  Future<void> _toggleCameraDirection() async {
+    // Check if cameras are available
+    if (cameras.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No cameras available on this device'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
     }
-    await controller.stopImageStream();
-    setState(() {
-      controller;
-    });
-    initializeCamera();
+
+    // Need at least 2 cameras to toggle
+    if (cameras.length < 2) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Only one camera available on this device'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+
+    try {
+      if (controller != null) {
+        await controller!.stopImageStream();
+        await controller!.dispose();
+      }
+
+      // Toggle camera direction
+      if (camDirec == CameraLensDirection.back) {
+        // Switch to front
+        final frontCamera = cameras.firstWhere(
+          (camera) => camera.lensDirection == CameraLensDirection.front,
+          orElse: () => cameras.last,
+        );
+        description = frontCamera;
+        camDirec = CameraLensDirection.front;
+      } else {
+        // Switch to back
+        final backCamera = cameras.firstWhere(
+          (camera) => camera.lensDirection == CameraLensDirection.back,
+          orElse: () => cameras.first,
+        );
+        description = backCamera;
+        camDirec = CameraLensDirection.back;
+      }
+
+      // Reset processing state
+      _skipFrameCount = 0;
+      _lastProcessedTime = null;
+
+      setState(() {});
+      await initializeCamera();
+    } catch (e) {
+      print('Error toggling camera: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to switch camera: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     List<Widget> stackChildren = [];
     size = MediaQuery.of(context).size;
-    if (controller != null) {
+
+    final isControllerInitialized = controller?.value.isInitialized ?? false;
+    final previewSize = controller?.value.previewSize;
+
+    if (isControllerInitialized && previewSize != null) {
       //TODO View for displaying the live camera footage
       stackChildren.add(
         Positioned.fill(
-          child: Container(
-            child:
-                (controller.value.isInitialized)
-                    ? FittedBox(
-                      fit: BoxFit.cover,
-                      child: SizedBox(
-                        width: controller.value.previewSize!.height,
-                        height: controller.value.previewSize!.width,
-                        child: CameraPreview(controller),
-                      ),
-                    )
-                    : Container(),
+          child: FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: previewSize.height,
+              height: previewSize.width,
+              child: CameraPreview(controller!),
+            ),
           ),
         ),
       );
 
-      //TODO View for displaying rectangles around detected aces
+      //TODO View for displaying rectangles around detected faces
       stackChildren.add(
         Positioned(
           top: 0.0,
@@ -293,40 +510,43 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
           child: buildResult(),
         ),
       );
+    } else {
+      // Show loading indicator while camera initializes
+      stackChildren.add(
+        const Center(child: CircularProgressIndicator(color: Colors.white)),
+      );
     }
 
     //TODO View for displaying the bar to switch camera direction or for registering faces
     stackChildren.add(
       Positioned(
-        bottom: 40,
-        left: 20,
-        right: 20,
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: .5),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0xFFE5E7EB)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: .1),
-                blurRadius: 10,
-                offset: const Offset(0, 4),
-              ),
-            ],
+        top: 16,
+        left: 16,
+        child: SafeArea(
+          child: FilledButton.tonalIcon(
+            onPressed: () => Navigator.pop(context),
+            icon: const Icon(Icons.arrow_back_rounded),
+            label: const Text('Back'),
           ),
-          child: Row(
-            mainAxisSize: MainAxisSize.max,
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.cached, color: Colors.white),
-                iconSize: 40,
-                onPressed: () {
-                  _toggleCameraDirection();
-                },
-              ),
-            ],
+        ),
+      ),
+    );
+
+    stackChildren.add(
+      Positioned(
+        bottom: 40,
+        left: 0,
+        right: 0,
+        child: Center(
+          child: FilledButton.icon(
+            style: FilledButton.styleFrom(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+              backgroundColor: Colors.white.withOpacity(0.9),
+              foregroundColor: Colors.black,
+            ),
+            onPressed: _toggleCameraDirection,
+            icon: const Icon(Icons.flip_camera_android_rounded, size: 28),
+            label: const Text('Flip Camera', style: TextStyle(fontSize: 16)),
           ),
         ),
       ),
@@ -373,13 +593,13 @@ class FaceDetectorPainter extends CustomPainter {
     final Paint boxPaint =
         Paint()
           ..style = PaintingStyle.stroke
-          ..strokeWidth = 2.5
-          ..color = const Color(0xFF10B981);
+          ..strokeWidth = 3.0
+          ..color = const Color(0xFF4CAF50);
 
     final Paint labelBgPaint =
         Paint()
           ..style = PaintingStyle.fill
-          ..color = const Color(0xFF09090b).withValues(alpha: .9);
+          ..color = const Color(0xFF212121).withOpacity(0.85);
 
     for (final face in faces) {
       final double left =

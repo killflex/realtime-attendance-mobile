@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:math';
-import 'dart:ui';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -46,11 +45,11 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   bool _showCautionDialog = true;
 
   // Camera and Face Recognition - Step 2
-  dynamic controller;
+  CameraController? controller;
   bool isBusy = false;
   late Size size;
-  late CameraDescription description = cameras[1];
-  late List<Recognition> recognitions = [];
+  late CameraDescription description;
+  List<Recognition> recognitions = [];
   late img.Image croppedFace;
   img.Image? image;
   CameraLensDirection camDirec = CameraLensDirection.front;
@@ -62,6 +61,15 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
   //TODO declare face recognizer
   late Recognizer recognizer;
+  bool _recognizerReady = false;
+
+  // Performance optimization
+  DateTime? _lastProcessedTime;
+  static const _processingInterval = Duration(
+    milliseconds: 500,
+  ); // Slower for registration
+  int _skipFrameCount = 0;
+  static const _skipFrames = 3; // Skip more frames during registration
 
   int _currentStep = 0;
   int _validFrameCount = 0;
@@ -99,16 +107,44 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   void initState() {
     super.initState();
 
+    // Initialize camera description safely
+    _initializeCameraDescription();
+
     //TODO initialize face detector
-    final options = FaceDetectorOptions(
-      performanceMode: FaceDetectorMode.accurate,
-    );
+    final options = FaceDetectorOptions(performanceMode: FaceDetectorMode.fast);
     faceDetector = FaceDetector(options: options);
 
     //TODO initialize face recognizer
-    recognizer = Recognizer(numThreads: 2);
+    _initRecognizer();
 
     // Camera will be initialized when moving to Step 2
+  }
+
+  Future<void> _initRecognizer() async {
+    recognizer = Recognizer(numThreads: 2);
+    await recognizer.init();
+    if (!mounted) return;
+    setState(() {
+      _recognizerReady = recognizer.isReady;
+    });
+  }
+
+  void _initializeCameraDescription() {
+    if (cameras.isEmpty) return;
+
+    try {
+      description = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.first,
+      );
+      camDirec = description.lensDirection;
+    } catch (e) {
+      print('Error initializing camera: $e');
+      if (cameras.isNotEmpty) {
+        description = cameras.first;
+        camDirec = description.lensDirection;
+      }
+    }
   }
 
   @override
@@ -119,6 +155,8 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     _phoneController.dispose();
     _emailController.dispose();
     controller?.dispose();
+    faceDetector.close();
+    recognizer.close();
     super.dispose();
   }
 
@@ -153,43 +191,83 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   }
 
   //TODO code to initialize the camera feed
-  initializeCamera() async {
-    controller = CameraController(
-      description,
-      ResolutionPreset.medium,
-      imageFormatGroup:
-          Platform.isAndroid
-              ? ImageFormatGroup
-                  .nv21 // for Android
-              : ImageFormatGroup.bgra8888,
-      enableAudio: false,
-    ); // for iOS);
-    await controller.initialize().then((_) {
-      if (!mounted) {
-        return;
+  Future<void> initializeCamera() async {
+    if (cameras.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No cameras available'),
+            backgroundColor: Colors.red,
+          ),
+        );
       }
-      setState(() {
-        controller;
-      });
-      controller.startImageStream(
-        (image) => {
-          if (!isBusy) {isBusy = true, frame = image, doFaceDetectionOnFrame()},
-        },
+      return;
+    }
+
+    try {
+      controller = CameraController(
+        description,
+        ResolutionPreset.medium,
+        imageFormatGroup:
+            Platform.isAndroid
+                ? ImageFormatGroup.nv21
+                : ImageFormatGroup.yuv420,
+        enableAudio: false,
       );
-    });
+
+      await controller!.initialize();
+
+      if (!mounted) return;
+
+      setState(() {});
+
+      controller!.startImageStream((image) {
+        if (!isBusy) {
+          // Throttle with time and frame skipping
+          final now = DateTime.now();
+          if (_lastProcessedTime == null ||
+              now.difference(_lastProcessedTime!) > _processingInterval) {
+            _skipFrameCount++;
+            if (_skipFrameCount > _skipFrames) {
+              _skipFrameCount = 0;
+              isBusy = true;
+              frame = image;
+              _lastProcessedTime = now;
+              doFaceDetectionOnFrame();
+            }
+          }
+        }
+      });
+    } catch (e) {
+      print('Camera init error: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Camera error: $e')));
+      }
+    }
   }
 
   bool _isFaceSharp(img.Image faceImage) {
-    final grayImage = img.grayscale(faceImage);
-    final laplacianImage = img.sobel(grayImage);
-    final pixels = laplacianImage.getBytes();
+    try {
+      // Use smaller image for sharpness check - much faster
+      final resized = img.copyResize(faceImage, width: 100);
+      final grayImage = img.grayscale(resized);
+      final laplacianImage = img.sobel(grayImage);
+      final pixels = laplacianImage.getBytes();
 
-    double mean = pixels.reduce((a, b) => a + b) / pixels.length;
-    double variance =
-        pixels.map((p) => pow(p - mean, 2)).reduce((a, b) => a + b) /
-        pixels.length;
+      if (pixels.isEmpty) return false;
 
-    return variance > 1500; // Threshold for sharpness
+      double mean = pixels.reduce((a, b) => a + b) / pixels.length;
+      double variance =
+          pixels.map((p) => pow(p - mean, 2)).reduce((a, b) => a + b) /
+          pixels.length;
+
+      return variance > 1500; // Threshold for sharpness
+    } catch (e) {
+      print('Sharpness check error: $e');
+      return true; // Assume sharp on error
+    }
   }
 
   bool _isFaceProperlyAligned(Face face, int step) {
@@ -212,65 +290,100 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   }
 
   //TODO face detection on a frame
-  doFaceDetectionOnFrame() async {
-    //TODO convert frame into InputImage format
-    InputImage? inputImage = getInputImage();
-    if (inputImage == null) {
+  Future<void> doFaceDetectionOnFrame() async {
+    try {
+      if (frame == null || controller == null) {
+        isBusy = false;
+        return;
+      }
+
+      //TODO convert frame into InputImage format
+      InputImage? inputImage = getInputImage();
+      if (inputImage == null) {
+        if (mounted) {
+          setState(() {
+            isBusy = false;
+          });
+        }
+        return;
+      }
+
+      //TODO pass InputImage to face detection model and detect faces
+      List<Face> faces = await faceDetector.processImage(inputImage);
+
       if (mounted) {
         setState(() {
-          isBusy = false;
+          _scanResults = faces;
         });
       }
-      return;
-    }
 
-    //TODO pass InputImage to face detection model and detect faces
-    List<Face> faces = await faceDetector.processImage(inputImage);
+      if (faces.isNotEmpty && _isFaceProperlyAligned(faces[0], _currentStep)) {
+        final tempImage =
+            Platform.isIOS
+                ? Util.convertBGRA8888ToImage(frame!)
+                : Util.convertNV21(frame!);
 
-    if (mounted) {
-      setState(() {
-        _scanResults = faces;
-      });
-    }
+        if (tempImage == null) {
+          isBusy = false;
+          return;
+        }
 
-    if (faces.isNotEmpty && _isFaceProperlyAligned(faces[0], _currentStep)) {
-      final tempImage =
-          Platform.isIOS
-              ? Util.convertBGRA8888ToImage(frame!)
-              : Util.convertNV21(frame!);
-      final rotated = img.copyRotate(
-        tempImage,
-        angle: camDirec == CameraLensDirection.front ? 270 : 90,
-      );
-      final cropped = img.copyCrop(
-        rotated,
-        x: faces[0].boundingBox.left.toInt(),
-        y: faces[0].boundingBox.top.toInt(),
-        width: faces[0].boundingBox.width.toInt(),
-        height: faces[0].boundingBox.height.toInt(),
-      );
+        final rotated = img.copyRotate(
+          tempImage,
+          angle: camDirec == CameraLensDirection.front ? 270 : 90,
+        );
 
-      // Create a copy for sharpness check to avoid modifying the original
-      final croppedCopy = img.copyResize(cropped, width: cropped.width);
+        final faceBox = faces[0].boundingBox;
+        if (faceBox.left < 0 ||
+            faceBox.top < 0 ||
+            faceBox.right > rotated.width ||
+            faceBox.bottom > rotated.height) {
+          isBusy = false;
+          return;
+        }
 
-      if (_isFaceSharp(croppedCopy)) {
-        _validFrameCount++;
-        if (_validFrameCount >= _requiredValidFrames && !getEmb) {
-          getEmb = true;
+        final cropped = img.copyCrop(
+          rotated,
+          x: faceBox.left.toInt(),
+          y: faceBox.top.toInt(),
+          width: faceBox.width.toInt(),
+          height: faceBox.height.toInt(),
+        );
+
+        // Check sharpness with small resized copy
+        if (_isFaceSharp(cropped)) {
+          _validFrameCount++;
+          if (_validFrameCount >= _requiredValidFrames && !getEmb) {
+            getEmb = true;
+            _validFrameCount = 0;
+            performFaceRecognition(faces[0], cropped);
+          }
+        } else {
           _validFrameCount = 0;
-          performFaceRecognition(faces[0], cropped);
         }
       } else {
         _validFrameCount = 0;
       }
-    } else {
-      _validFrameCount = 0;
-    }
 
-    isBusy = false;
+      isBusy = false;
+    } catch (e) {
+      print('Face detection error: $e');
+      isBusy = false;
+    }
   }
 
   void performFaceRecognition(Face face, img.Image cropped) async {
+    if (!_recognizerReady) {
+      if (mounted) {
+        setState(() {
+          isBusy = false;
+        });
+      } else {
+        isBusy = false;
+      }
+      return;
+    }
+
     recognitions.clear();
 
     // Store the first face (straight) as the profile image
@@ -304,172 +417,89 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   TextEditingController textEditingController = TextEditingController();
   showFaceRegistrationDialogue(img.Image croppedFace) {
     dialogShown = true;
-
-    // Use the user data from Step 1
     String userName = _namaLengkapController.text.trim();
 
     showDialog(
       context: context,
       barrierDismissible: false,
       builder:
-          (ctx) => Dialog(
-            backgroundColor: Colors.transparent,
-            insetPadding: const EdgeInsets.symmetric(
-              horizontal: 20,
-              vertical: 60,
-            ),
-            child: ClipRRect(
-              borderRadius: BorderRadius.circular(8),
-              child: BackdropFilter(
-                filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                child: Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: .95),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: const Color(0xFFD1D5DB)),
+          (ctx) => AlertDialog(
+            title: const Text('Confirm Registration'),
+            content: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Captured ${embeddings.length} face angles',
+                    style: Theme.of(context).textTheme.bodyMedium,
                   ),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text(
-                          "Confirm Registration",
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            fontSize: 20,
-                            color: Color(0xFF09090b),
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Captured ${embeddings.length} face angles',
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            color: Color(0xFF6B7280),
-                          ),
-                        ),
-                        const SizedBox(height: 20),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Image.memory(
-                            Uint8List.fromList(img.encodeBmp(croppedFace)),
-                            width: 150,
-                            height: 150,
-                            fit: BoxFit.cover,
-                          ),
-                        ),
-                        const SizedBox(height: 20),
-                        Container(
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF9FAFB),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: const Color(0xFFE5E7EB)),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              _buildInfoRow('Nama Lengkap', userName),
-                              const SizedBox(height: 8),
-                              _buildInfoRow('Status', _selectedStatus ?? '-'),
-                              const SizedBox(height: 8),
-                              _buildInfoRow('Unit Kerja', _selectedUnit ?? '-'),
-                              const SizedBox(height: 8),
-                              _buildInfoRow(
-                                _getIdentityLabel(),
-                                _identityController.text,
-                              ),
-                              const SizedBox(height: 8),
-                              _buildInfoRow('Phone', _phoneController.text),
-                              const SizedBox(height: 8),
-                              _buildInfoRow('Email', _emailController.text),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 20),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: OutlinedButton(
-                                onPressed: () {
-                                  // Reset and go back
-                                  _currentStep = 0;
-                                  embeddings.clear();
-                                  frontFace = null;
-                                  dialogShown = false;
-                                  Navigator.pop(context);
-                                },
-                                style: OutlinedButton.styleFrom(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 14,
-                                  ),
-                                  side: const BorderSide(
-                                    color: Color(0xFFD1D5DB),
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                ),
-                                child: const Text(
-                                  "Retake",
-                                  style: TextStyle(color: Color(0xFF09090b)),
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: ElevatedButton(
-                                onPressed: () {
-                                  recognizer.registerFaceInDB(
-                                    userName,
-                                    embeddings,
-                                    Uint8List.fromList(
-                                      img.encodeBmp(croppedFace),
-                                    ),
-                                  );
-
-                                  // Reset state
-                                  _currentStep = 0;
-                                  embeddings.clear();
-                                  frontFace = null;
-                                  dialogShown = false;
-
-                                  Navigator.pop(context); // Close dialog
-                                  Navigator.pop(context); // Go back to home
-
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        "Face Registered Successfully!",
-                                      ),
-                                      backgroundColor: Color(0xFF10B981),
-                                    ),
-                                  );
-                                },
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF09090b),
-                                  foregroundColor: Colors.white,
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 14,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                ),
-                                child: const Text("Confirm"),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
+                  const SizedBox(height: 16),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.memory(
+                      Uint8List.fromList(img.encodeBmp(croppedFace)),
+                      width: 150,
+                      height: 150,
+                      fit: BoxFit.cover,
                     ),
                   ),
-                ),
+                  const SizedBox(height: 16),
+                  Card.outlined(
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildInfoRow('Nama', userName),
+                          const Divider(height: 16),
+                          _buildInfoRow('Status', _selectedStatus ?? '-'),
+                          const Divider(height: 16),
+                          _buildInfoRow('Unit', _selectedUnit ?? '-'),
+                          const Divider(height: 16),
+                          _buildInfoRow(
+                            _getIdentityLabel(),
+                            _identityController.text,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  _currentStep = 0;
+                  embeddings.clear();
+                  frontFace = null;
+                  dialogShown = false;
+                  Navigator.pop(context);
+                },
+                child: const Text('Retake'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  recognizer.registerFaceInDB(
+                    userName,
+                    embeddings,
+                    Uint8List.fromList(img.encodeBmp(croppedFace)),
+                  );
+                  _currentStep = 0;
+                  embeddings.clear();
+                  frontFace = null;
+                  dialogShown = false;
+                  Navigator.pop(context);
+                  Navigator.pop(context);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Face Registered Successfully!'),
+                    ),
+                  );
+                },
+                child: const Text('Confirm'),
+              ),
+            ],
           ),
     );
   }
@@ -503,8 +533,12 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   };
 
   InputImage? getInputImage() {
-    final camera =
-        camDirec == CameraLensDirection.front ? cameras[1] : cameras[0];
+    if (controller == null || frame == null) return null;
+
+    final camera = cameras.firstWhere(
+      (cam) => cam.lensDirection == camDirec,
+      orElse: () => description,
+    );
     final sensorOrientation = camera.sensorOrientation;
 
     InputImageRotation? rotation;
@@ -609,15 +643,17 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   Widget buildResult() {
     if (_scanResults == null ||
         controller == null ||
-        !controller.value.isInitialized) {
-      return const Center(child: Text('Camera is not initialized'));
+        !controller!.value.isInitialized) {
+      return const SizedBox.shrink();
+    }
+
+    final previewSize = controller!.value.previewSize;
+    if (previewSize == null) {
+      return const SizedBox.shrink();
     }
 
     // Get the camera preview size (already rotated for portrait)
-    final cameraPreviewSize = Size(
-      controller.value.previewSize!.height,
-      controller.value.previewSize!.width,
-    );
+    final cameraPreviewSize = Size(previewSize.height, previewSize.width);
 
     // Calculate the actual displayed size accounting for BoxFit.cover
     final screenSize = MediaQuery.of(context).size;
@@ -644,19 +680,44 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   }
 
   //TODO toggle camera direction
-  void _toggleCameraDirection() async {
-    if (camDirec == CameraLensDirection.back) {
-      camDirec = CameraLensDirection.front;
-      description = cameras[1];
-    } else {
-      camDirec = CameraLensDirection.back;
-      description = cameras[0];
+  Future<void> _toggleCameraDirection() async {
+    if (cameras.isEmpty || cameras.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Only one camera available')),
+      );
+      return;
     }
-    await controller.stopImageStream();
-    setState(() {
-      controller;
-    });
-    initializeCamera();
+
+    try {
+      if (controller != null) {
+        await controller!.stopImageStream();
+        await controller!.dispose();
+      }
+
+      if (camDirec == CameraLensDirection.back) {
+        final frontCamera = cameras.firstWhere(
+          (camera) => camera.lensDirection == CameraLensDirection.front,
+          orElse: () => cameras.last,
+        );
+        description = frontCamera;
+        camDirec = CameraLensDirection.front;
+      } else {
+        final backCamera = cameras.firstWhere(
+          (camera) => camera.lensDirection == CameraLensDirection.back,
+          orElse: () => cameras.first,
+        );
+        description = backCamera;
+        camDirec = CameraLensDirection.back;
+      }
+
+      _skipFrameCount = 0;
+      _lastProcessedTime = null;
+
+      setState(() {});
+      await initializeCamera();
+    } catch (e) {
+      print('Toggle camera error: $e');
+    }
   }
 
   @override
@@ -1151,22 +1212,20 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     List<Widget> stackChildren = [];
     size = MediaQuery.of(context).size;
 
-    if (controller != null) {
+    final isControllerInitialized = controller?.value.isInitialized ?? false;
+    final previewSize = controller?.value.previewSize;
+
+    if (isControllerInitialized && previewSize != null) {
       //TODO View for displaying the live camera footage
       stackChildren.add(
         Positioned.fill(
-          child: Container(
-            child:
-                (controller.value.isInitialized)
-                    ? FittedBox(
-                      fit: BoxFit.cover,
-                      child: SizedBox(
-                        width: controller.value.previewSize!.height,
-                        height: controller.value.previewSize!.width,
-                        child: CameraPreview(controller),
-                      ),
-                    )
-                    : Container(),
+          child: FittedBox(
+            fit: BoxFit.cover,
+            child: SizedBox(
+              width: previewSize.height,
+              height: previewSize.width,
+              child: CameraPreview(controller!),
+            ),
           ),
         ),
       );
@@ -1180,6 +1239,10 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
           height: size.height,
           child: buildResult(),
         ),
+      );
+    } else {
+      stackChildren.add(
+        const Center(child: CircularProgressIndicator(color: Colors.white)),
       );
     }
 
@@ -1197,120 +1260,90 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
           top: 60,
           left: 0,
           right: 0,
-          child: Column(
-            children: [
-              Container(
-                margin: const EdgeInsets.symmetric(horizontal: 20),
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: .5),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: const Color(0xFFE5E7EB)),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: .1),
-                      blurRadius: 10,
-                      offset: const Offset(0, 4),
+          child: Card(
+            margin: const EdgeInsets.symmetric(horizontal: 20),
+            color: Colors.white.withOpacity(0.9),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                children: [
+                  Icon(
+                    angleIcons[faceAngles[_currentStep]],
+                    color: Colors.black,
+                    size: 40,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    positionInstructions[_currentStep],
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.black,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
                     ),
-                  ],
-                ),
-                child: Column(
-                  children: [
-                    Icon(
-                      angleIcons[faceAngles[_currentStep]],
-                      color: Colors.white,
-                      size: 40,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      positionInstructions[_currentStep],
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: List.generate(
-                        faceAngles.length,
-                        (index) => Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 4),
-                          width: 12,
-                          height: 12,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color:
-                                index < _currentStep
-                                    ? const Color(0xFF10B981)
-                                    : index == _currentStep
-                                    ? Colors.white
-                                    : const Color(0xFFD1D5DB),
-                            boxShadow: [
-                              BoxShadow(
-                                color: Colors.black.withValues(alpha: .1),
-                                blurRadius: 10,
-                                offset: const Offset(0, 4),
-                              ),
-                            ],
-                          ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: List.generate(
+                      faceAngles.length,
+                      (index) => Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 4),
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color:
+                              index < _currentStep
+                                  ? Colors.green
+                                  : index == _currentStep
+                                  ? Colors.blue
+                                  : Colors.grey[300],
                         ),
                       ),
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       );
     }
 
-    //TODO View for displaying the bar to switch camera direction or for registering faces
+    //TODO View for displaying the bar to switch camera direction
     stackChildren.add(
       Positioned(
         bottom: 40,
-        left: 20,
-        right: 20,
-        child: Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: .5),
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: const Color(0xFFE5E7EB)),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.max,
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            children: [
-              IconButton(
-                icon: const Icon(Icons.cached, color: Colors.white),
-                iconSize: 40,
-                onPressed: () {
-                  _toggleCameraDirection();
-                },
+        left: 0,
+        right: 0,
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            FloatingActionButton(
+              heroTag: 'flip',
+              backgroundColor: Colors.white,
+              onPressed: _toggleCameraDirection,
+              child: const Icon(
+                Icons.flip_camera_android_rounded,
+                color: Colors.black,
               ),
-              const SizedBox(height: 10),
-              IconButton(
-                icon: const Icon(
-                  Icons.face_retouching_natural,
-                  color: Colors.white,
-                ),
-                iconSize: 40,
-                onPressed: () {
-                  // Reset and start registration
-                  setState(() {
-                    _currentStep = 0;
-                    embeddings.clear();
-                    frontFace = null;
-                    dialogShown = false;
-                  });
-                },
-              ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 16),
+            FloatingActionButton(
+              heroTag: 'reset',
+              backgroundColor: Colors.white,
+              onPressed: () {
+                setState(() {
+                  _currentStep = 0;
+                  embeddings.clear();
+                  frontFace = null;
+                  dialogShown = false;
+                });
+              },
+              child: const Icon(Icons.refresh_rounded, color: Colors.black),
+            ),
+          ],
         ),
       ),
     );
@@ -1334,125 +1367,41 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       context: context,
       barrierDismissible: false,
       builder:
-          (context) => Dialog(
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
+          (context) => AlertDialog(
+            icon: const Icon(Icons.info_outline, size: 48),
+            title: const Text('Capture Instructions'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ListTile(
+                  leading: const Icon(Icons.visibility_off),
+                  title: const Text('Remove glasses'),
+                  dense: true,
+                ),
+                ListTile(
+                  leading: const Icon(Icons.wb_sunny_outlined),
+                  title: const Text('Good lighting'),
+                  dense: true,
+                ),
+                ListTile(
+                  leading: const Icon(Icons.face),
+                  title: const Text('Follow instructions'),
+                  dense: true,
+                ),
+                ListTile(
+                  leading: const Icon(Icons.camera_alt),
+                  title: const Text('5 different angles'),
+                  dense: true,
+                ),
+              ],
             ),
-            child: Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFFE5E7EB)),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Start Capture'),
               ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFFEF3C7),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: const Icon(
-                      Icons.warning_amber_rounded,
-                      color: Color(0xFFF59E0B),
-                      size: 40,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Important Instructions',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF09090b),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF9FAFB),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: const Color(0xFFE5E7EB)),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        _buildInstructionItem(
-                          Icons.visibility_off,
-                          'Remove glasses if wearing any',
-                        ),
-                        const SizedBox(height: 12),
-                        _buildInstructionItem(
-                          Icons.wb_sunny_outlined,
-                          'Ensure good lighting on your face',
-                        ),
-                        const SizedBox(height: 12),
-                        _buildInstructionItem(
-                          Icons.face,
-                          'Follow the on-screen position instructions',
-                        ),
-                        const SizedBox(height: 12),
-                        _buildInstructionItem(
-                          Icons.camera_alt,
-                          'Capture 5 different face angles',
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 20),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: () {
-                        Navigator.pop(context);
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFF09090b),
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        elevation: 0,
-                      ),
-                      child: const Text(
-                        'Start Capture',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+            ],
           ),
-    );
-  }
-
-  Widget _buildInstructionItem(IconData icon, String text) {
-    return Row(
-      children: [
-        Container(
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: const Color(0xFF09090b),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Icon(icon, color: Colors.white, size: 20),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: Text(
-            text,
-            style: const TextStyle(fontSize: 14, color: Color(0xFF374151)),
-          ),
-        ),
-      ],
     );
   }
 }

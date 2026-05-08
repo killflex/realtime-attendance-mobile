@@ -9,10 +9,11 @@ class HomeScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
     final screenWidth = MediaQuery.of(context).size.width;
 
     return Scaffold(
-      backgroundColor: Colors.grey[50],
       body: SafeArea(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -20,58 +21,54 @@ class HomeScreen extends StatelessWidget {
           children: [
             const SizedBox(height: 30),
 
-            // Header Text
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 20),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  SizedBox(width: 10),
-                  Text(
-                    "Face Recognition Attendance",
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF09090b),
-                    ),
-                  ),
-                ],
+            // Header Text with Material 3
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20),
+              child: Text(
+                "Face Recognition Attendance",
+                style: theme.textTheme.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  color: colorScheme.onSurface,
+                ),
+                textAlign: TextAlign.center,
               ),
             ),
 
             const SizedBox(height: 40),
 
             // Logo
-            Center(
-              child: Container(
+            Hero(
+              tag: 'app_logo',
+              child: Image.asset(
+                "images/logo.png",
                 width: screenWidth * 0.55,
                 height: screenWidth * 0.55,
-                decoration: BoxDecoration(
-                  image: const DecorationImage(
-                    image: AssetImage("images/logo.png"),
-                    fit: BoxFit.contain,
-                  ),
-                ),
+                fit: BoxFit.contain,
               ),
             ),
 
             const SizedBox(height: 40),
 
-            // Buttons as Cards
+            // Material 3 Cards with ListTile
             Expanded(
-              child: Container(
-                width: double.infinity,
+              child: ListView(
                 padding: const EdgeInsets.symmetric(
                   horizontal: 24,
                   vertical: 10,
                 ),
-                child: Column(
-                  children: [
-                    _actionCard(
-                      context,
-                      icon: Icons.person_add_rounded,
-                      title: "Register New Face",
-                      subtitle: "Capture and store a new user face",
+                children: [
+                  Card.filled(
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: colorScheme.primaryContainer,
+                        child: Icon(
+                          Icons.person_add_rounded,
+                          color: colorScheme.onPrimaryContainer,
+                        ),
+                      ),
+                      title: const Text("Register New Face"),
+                      subtitle: const Text("Capture and store a new user face"),
+                      trailing: const Icon(Icons.arrow_forward_ios_rounded),
                       onTap:
                           () => Navigator.push(
                             context,
@@ -80,12 +77,22 @@ class HomeScreen extends StatelessWidget {
                             ),
                           ),
                     ),
-                    const SizedBox(height: 15),
-                    _actionCard(
-                      context,
-                      icon: Icons.filter_center_focus_rounded,
-                      title: "Recognize Face",
-                      subtitle: "Identify registered faces in real-time",
+                  ),
+                  const SizedBox(height: 12),
+                  Card.filled(
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: colorScheme.secondaryContainer,
+                        child: Icon(
+                          Icons.filter_center_focus_rounded,
+                          color: colorScheme.onSecondaryContainer,
+                        ),
+                      ),
+                      title: const Text("Recognize Face"),
+                      subtitle: const Text(
+                        "Identify registered faces in real-time",
+                      ),
+                      trailing: const Icon(Icons.arrow_forward_ios_rounded),
                       onTap:
                           () => Navigator.push(
                             context,
@@ -94,126 +101,55 @@ class HomeScreen extends StatelessWidget {
                             ),
                           ),
                     ),
-                    const SizedBox(height: 15),
-                    _actionCard(
-                      context,
-                      icon: Icons.storage_rounded,
-                      title: "Registered Faces",
-                      subtitle: "View all stored face data",
-                      onTap: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => const RegisteredFacesScreen(),
+                  ),
+                  const SizedBox(height: 12),
+                  Card.filled(
+                    child: ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: colorScheme.tertiaryContainer,
+                        child: Icon(
+                          Icons.storage_rounded,
+                          color: colorScheme.onTertiaryContainer,
+                        ),
+                      ),
+                      title: const Text("Registered Faces"),
+                      subtitle: const Text("View all stored face data"),
+                      trailing: const Icon(Icons.arrow_forward_ios_rounded),
+                      onTap:
+                          () => Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => const RegisteredFacesScreen(),
+                            ),
                           ),
-                        );
-                      },
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
 
-            // Footer
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
-              decoration: const BoxDecoration(
-                border: Border(
-                  top: BorderSide(color: Color(0xFFE5E7EB), width: 1),
-                ),
-              ),
+            // Footer with Material 3
+            Divider(color: colorScheme.outlineVariant),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
               child: Column(
                 children: [
                   Text(
                     '© 2026 Face Recognition Attendance',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF6B7280),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     'Made with ❤️ by Ferry Hasan',
-                    style: TextStyle(fontSize: 11, color: Color(0xFF9CA3AF)),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _actionCard(
-    BuildContext context, {
-    required IconData icon,
-    required String title,
-    required String subtitle,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(15),
-        width: double.infinity,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(8),
-          color: Colors.white,
-          border: Border.all(color: const Color(0xFFE5E7EB)),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: .05),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
-            ),
-          ],
-        ),
-
-        child: Row(
-          children: [
-            Container(
-              width: 56,
-              height: 56,
-              decoration: BoxDecoration(
-                color: const Color(0xFFF9FAFB),
-                borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: const Color(0xFFE5E7EB)),
-              ),
-              child: Icon(icon, size: 28, color: const Color(0xFF09090b)),
-            ),
-
-            const SizedBox(width: 16),
-
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF09090b),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    subtitle,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: Color(0xFF6B7280),
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
                     ),
                   ),
                 ],
               ),
-            ),
-            const Icon(
-              Icons.arrow_forward_ios_rounded,
-              color: Color(0xFF09090b),
-              size: 16,
             ),
           ],
         ),
