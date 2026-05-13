@@ -12,17 +12,17 @@ import 'Recognition.dart';
 class Recognizer {
   Interpreter? _interpreter;
   late InterpreterOptions _interpreterOptions;
-  static const int inputWidth = 112;
-  static const int inputHeight = 112;
-  static const int outputSize = 128;
+  static const int inputWidth = 160;
+  static const int inputHeight = 160;
+  static const int outputSize = 512;
   final dbHelper = DatabaseHelper();
   Map<String, List<List<double>>> registered = {};
 
   // Cache untuk optimasi
-  img.Image? _lastResizedImage;
-  List<dynamic>? _lastInputArray;
 
   String get modelName => 'assets/facenet.tflite';
+  // TODO: switch to 'assets/mobilefacenet_f32.tflite' (112x112, 128-dim)
+  // after re-exporting without mixed_float16 (see notebook fix below)
 
   bool _isLoaded = false;
 
@@ -39,7 +39,13 @@ class Recognizer {
 
   Future<void> init() async {
     await loadModel();
-    await initDB();
+    try {
+      await initDB();
+    } catch (e, st) {
+      // DB init failure is non-fatal: model inference still works
+      // Registered faces just won't be loaded from DB
+      print('[Recognizer] initDB error (non-fatal, continuing): $e\n$st');
+    }
   }
 
   initDB() async {
@@ -47,7 +53,7 @@ class Recognizer {
     loadRegisteredFaces();
   }
 
-  void loadRegisteredFaces() async {
+  Future<void> loadRegisteredFaces() async {
     registered.clear();
     final allRows = await dbHelper.queryAllRows();
     // debugPrint('query all rows:');
@@ -90,64 +96,69 @@ class Recognizer {
     return jpg;
   }
 
-  void registerFaceInDB(
+  Future<void> registerFaceInDB(
     String name,
     List<List<double>> embeddings,
     Uint8List faceImage,
   ) async {
-    String embeddingJson = jsonEncode(embeddings);
-    Uint8List compressedImage = await compressImage(faceImage);
-    Map<String, dynamic> row = {
+    // Ensure DB is open — idempotent: if already open, returns immediately
+    await dbHelper.init();
+
+    final String embeddingJson = jsonEncode(embeddings);
+    final Uint8List compressedImage = await compressImage(faceImage);
+
+    final Map<String, dynamic> row = {
       DatabaseHelper.columnName: name,
       DatabaseHelper.columnEmbedding: embeddingJson,
-      'image': compressedImage,
+      DatabaseHelper.columnImage: compressedImage,
     };
 
-    final id = await dbHelper.insert(row);
-    print('inserted row id: $id');
+    final int id = await dbHelper.insert(row);
+    print('[Recognizer] ✅ Registered "$name" → DB id=$id  embeddings=${embeddings.length}');
 
-    loadRegisteredFaces();
+    // Reload in-memory map so recognition works immediately after registration
+    await loadRegisteredFaces();
   }
+
 
   Future<void> loadModel() async {
     try {
-      _interpreter = await Interpreter.fromAsset(modelName);
+      print('[Recognizer] Loading model: $modelName');
+      _interpreter = await Interpreter.fromAsset(
+        modelName,
+        options: _interpreterOptions,
+      );
       _isLoaded = true;
-    } catch (e) {
+      print(
+        '[Recognizer] ✅ Model loaded. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
+      );
+    } catch (e, st) {
       _isLoaded = false;
-      print('Unable to create interpreter, Caught Exception: ${e.toString()}');
+      print('[Recognizer] ❌ Failed to load model "$modelName": $e\n$st');
     }
   }
 
   List<dynamic> imageToArray(img.Image inputImage) {
-    // Cache optimization
     img.Image resizedImage = img.copyResize(
       inputImage,
       width: inputWidth,
       height: inputHeight,
     );
 
-    List<double> flattenedList =
-        resizedImage.data!
-            .expand((channel) => [channel.r, channel.g, channel.b])
-            .map((value) => value.toDouble())
-            .toList();
-    Float32List float32Array = Float32List.fromList(flattenedList);
-    int channels = 3;
-    int height = inputHeight;
-    int width = inputWidth;
-    Float32List reshapedArray = Float32List(1 * height * width * channels);
-    for (int c = 0; c < channels; c++) {
-      for (int h = 0; h < height; h++) {
-        for (int w = 0; w < width; w++) {
-          int index = c * height * width + h * width + w;
-          reshapedArray[index] =
-              (float32Array[c * height * width + h * width + w] - 127.5) /
-              127.5;
-        }
+    // Extract only R, G, B channels (not alpha) and normalize to [-1, 1]
+    final int totalPixels = inputWidth * inputHeight;
+    Float32List inputBuffer = Float32List(totalPixels * 3);
+    int idx = 0;
+    for (int y = 0; y < inputHeight; y++) {
+      for (int x = 0; x < inputWidth; x++) {
+        final pixel = resizedImage.getPixel(x, y);
+        inputBuffer[idx++] = (pixel.r.toDouble() - 127.5) / 127.5;
+        inputBuffer[idx++] = (pixel.g.toDouble() - 127.5) / 127.5;
+        inputBuffer[idx++] = (pixel.b.toDouble() - 127.5) / 127.5;
       }
     }
-    return reshapedArray.reshape([1, inputWidth, inputHeight, 3]);
+
+    return inputBuffer.reshape([1, inputHeight, inputWidth, 3]);
   }
 
   Recognition recognize(img.Image image, Rect location) {
@@ -157,23 +168,33 @@ class Recognizer {
     }
 
     var input = imageToArray(image);
-    print(input.shape.toString());
+    print('Input shape: ${input.shape}');
 
-    //TODO output array
-    List output = List.filled(1 * outputSize, 0).reshape([1, outputSize]);
+    // CRITICAL: output buffer MUST be a List<List<double>> — int or bare list causes silent failure
+    final List<List<double>> output = [List.filled(outputSize, 0.0)];
 
     //TODO performs inference
     final runs = DateTime.now().millisecondsSinceEpoch;
     _interpreter!.run(input, output);
     final run = DateTime.now().millisecondsSinceEpoch - runs;
-    print('Time to run inference: $run ms$output');
 
-    //TODO convert dynamic list to double list
-    List<double> outputArray = output.first.cast<double>();
+    List<double> outputArray = output[0];
+
+    // Guard: NaN/Inf embedding means model failed for this crop (bad input region)
+    final bool hasNaN = outputArray.any((v) => v.isNaN || v.isInfinite);
+    if (hasNaN) {
+      print('[Recognizer] ⚠️ NaN/Inf in embedding — invalid crop or model issue. Skipping.');
+      // distance = -2 signals "bad embedding" to callers (distinct from -5 = no DB)
+      return Recognition('__invalid__', location, List.filled(outputSize, 0.0), -2);
+    }
+
+    print(
+      'Inference time: ${run}ms | embedding[0..4]: ${outputArray.sublist(0, 4).map((v) => v.toStringAsFixed(4))}',
+    );
 
     //TODO looks for the nearest embeeding in the database and returns the pair
     Pair pair = findNearest(outputArray);
-    print("distance= ${pair.distance}");
+    print('distance= ${pair.distance}');
 
     return Recognition(pair.name, location, outputArray, pair.distance);
   }
@@ -214,6 +235,12 @@ class Recognizer {
         pair.distance = similarity;
         pair.name = name;
       }
+    }
+
+    // FaceNet L2-normalized: threshold 1.0 (Euclidean on unit sphere 0–2)
+    // Switch to 0.8 when using mobilefacenet_f32.tflite
+    if (pair.distance > 1.0 && pair.distance != -5) {
+      pair.name = "Unknown";
     }
 
     return pair;

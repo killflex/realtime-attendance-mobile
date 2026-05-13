@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
@@ -73,7 +74,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
   int _currentStep = 0;
   int _validFrameCount = 0;
-  final int _requiredValidFrames = 3;
+  final int _requiredValidFrames = 1; // 1 sharp frame is enough; throttling already limits rate
 
   List<String> faceAngles = ["straight", "right", "left", "down", "up"];
 
@@ -93,11 +94,11 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   int registrationStep = 0;
 
   List<String> positionInstructions = [
-    "Look straight into the camera",
-    "Tilt your head slightly to the right",
-    "Tilt your head slightly to the left",
-    "Look down",
-    "Look up",
+    "Lihat lurus ke kamera",
+    "Tengok sedikit ke kanan",
+    "Tengok sedikit ke kiri",
+    "Lihat ke bawah",
+    "Lihat ke atas",
   ];
 
   bool dialogShown = false;
@@ -121,12 +122,23 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   }
 
   Future<void> _initRecognizer() async {
-    recognizer = Recognizer(numThreads: 2);
-    await recognizer.init();
-    if (!mounted) return;
-    setState(() {
-      _recognizerReady = recognizer.isReady;
-    });
+    print('[REG] _initRecognizer: start');
+    try {
+      recognizer = Recognizer(numThreads: 2);
+      print('[REG] _initRecognizer: Recognizer object created, calling init()...');
+      await recognizer.init();
+      print('[REG] _initRecognizer: init() complete. isReady=${recognizer.isReady}');
+      if (!mounted) {
+        print('[REG] _initRecognizer: widget not mounted after init — skipping setState');
+        return;
+      }
+      setState(() {
+        _recognizerReady = recognizer.isReady;
+      });
+      print('[REG] _initRecognizer: _recognizerReady set to $_recognizerReady');
+    } catch (e, st) {
+      print('[REG] _initRecognizer ERROR: $e\n$st');
+    }
   }
 
   void _initializeCameraDescription() {
@@ -250,32 +262,44 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
   bool _isFaceSharp(img.Image faceImage) {
     try {
-      // Use smaller image for sharpness check - much faster
-      final resized = img.copyResize(faceImage, width: 100);
-      final grayImage = img.grayscale(resized);
-      final laplacianImage = img.sobel(grayImage);
-      final pixels = laplacianImage.getBytes();
+      // Resize to small version for speed
+      final resized = img.copyResize(faceImage, width: 64, height: 64);
 
-      if (pixels.isEmpty) return false;
+      // Calculate luminance variance pixel-by-pixel
+      // (getBytes() in image v4 returns RGBA — cannot be used for grayscale analysis)
+      double sumLuma = 0.0;
+      final int total = resized.width * resized.height;
+      for (int y = 0; y < resized.height; y++) {
+        for (int x = 0; x < resized.width; x++) {
+          final p = resized.getPixel(x, y);
+          sumLuma += 0.299 * p.r + 0.587 * p.g + 0.114 * p.b;
+        }
+      }
+      final double mean = sumLuma / total;
 
-      double mean = pixels.reduce((a, b) => a + b) / pixels.length;
-      double variance =
-          pixels.map((p) => pow(p - mean, 2)).reduce((a, b) => a + b) /
-          pixels.length;
+      double variance = 0.0;
+      for (int y = 0; y < resized.height; y++) {
+        for (int x = 0; x < resized.width; x++) {
+          final p = resized.getPixel(x, y);
+          final luma = 0.299 * p.r + 0.587 * p.g + 0.114 * p.b;
+          variance += (luma - mean) * (luma - mean);
+        }
+      }
+      variance /= total;
 
-      return variance > 1500; // Threshold for sharpness
+      print('[REG] sharpness variance=${variance.toStringAsFixed(1)} (threshold=50)');
+      return variance > 50; // Lowered threshold — mobile cameras are generally adequate
     } catch (e) {
-      print('Sharpness check error: $e');
-      return true; // Assume sharp on error
+      print('[REG] Sharpness check error: $e — assuming sharp');
+      return true;
     }
   }
 
   bool _isFaceProperlyAligned(Face face, int step) {
     switch (step) {
       case 0:
-        return face.headEulerAngleY!.abs() < 10 &&
-            face.headEulerAngleX!.abs() < 10 &&
-            face.boundingBox.width > 80;
+        return face.headEulerAngleY!.abs() < 15 &&
+            face.headEulerAngleX!.abs() < 15;
       case 1:
         return face.headEulerAngleY! < -20;
       case 2:
@@ -292,125 +316,201 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   //TODO face detection on a frame
   Future<void> doFaceDetectionOnFrame() async {
     try {
-      if (frame == null || controller == null) {
-        isBusy = false;
-        return;
-      }
+      if (frame == null || controller == null) { isBusy = false; return; }
 
-      //TODO convert frame into InputImage format
       InputImage? inputImage = getInputImage();
-      if (inputImage == null) {
-        if (mounted) {
-          setState(() {
-            isBusy = false;
-          });
-        }
-        return;
-      }
+      if (inputImage == null) { isBusy = false; return; }
 
-      //TODO pass InputImage to face detection model and detect faces
       List<Face> faces = await faceDetector.processImage(inputImage);
+      if (mounted) setState(() => _scanResults = faces);
 
-      if (mounted) {
-        setState(() {
-          _scanResults = faces;
-        });
+      print('[REG] faces=${faces.length}, step=$_currentStep, validFrames=$_validFrameCount');
+
+      if (faces.isEmpty) { _validFrameCount = 0; isBusy = false; return; }
+
+      final face = faces[0];
+      final aligned = _isFaceProperlyAligned(face, _currentStep);
+      print('[REG] aligned=$aligned eulerY=${face.headEulerAngleY?.toStringAsFixed(1)} eulerX=${face.headEulerAngleX?.toStringAsFixed(1)}');
+
+      if (!aligned) { _validFrameCount = 0; isBusy = false; return; }
+
+      // Step 1: Convert NV21 → landscape image (raw, no rotation)
+      img.Image? tempImage;
+      if (Platform.isIOS) {
+        tempImage = await compute(Util.convertBGRA8888ToImage, frame!);
+      } else {
+        tempImage = await compute(Util.convertNV21, frame!);
+      }
+      if (tempImage == null) { isBusy = false; return; }
+
+      // Step 2: Transform ML Kit portrait bbox → landscape coordinates
+      // ML Kit returns bbox in portrait (rotated) space. Transform back to avoid
+      // rotating the full ~3MB frame — instead we only rotate the small crop.
+      final faceBox = face.boundingBox;
+      final Rect lsBox = _portraitBoxToLandscape(
+        faceBox, tempImage.width, tempImage.height,
+      );
+
+      final int left   = lsBox.left.clamp(0.0,  (tempImage.width  - 1).toDouble()).toInt();
+      final int top    = lsBox.top.clamp(0.0,   (tempImage.height - 1).toDouble()).toInt();
+      final int right  = lsBox.right.clamp((left + 1).toDouble(),  tempImage.width.toDouble()).toInt();
+      final int bottom = lsBox.bottom.clamp((top  + 1).toDouble(), tempImage.height.toDouble()).toInt();
+      final int cropW  = right - left;
+      final int cropH  = bottom - top;
+
+      if (cropW <= 0 || cropH <= 0) {
+        print('[REG] Invalid crop: ${cropW}x$cropH');
+        isBusy = false; return;
       }
 
-      if (faces.isNotEmpty && _isFaceProperlyAligned(faces[0], _currentStep)) {
-        final tempImage =
-            Platform.isIOS
-                ? Util.convertBGRA8888ToImage(frame!)
-                : Util.convertNV21(frame!);
+      // Step 3: Crop SMALL region from landscape (cheap, ~200x200px vs 720x480)
+      final img.Image croppedLandscape = img.copyCrop(
+        tempImage, x: left, y: top, width: cropW, height: cropH,
+      );
 
-        if (tempImage == null) {
-          isBusy = false;
-          return;
-        }
+      // Step 4: Rotate only the small crop to portrait orientation
+      final img.Image cropped = img.copyRotate(
+        croppedLandscape,
+        angle: camDirec == CameraLensDirection.front ? 270 : 90,
+      );
 
-        final rotated = img.copyRotate(
-          tempImage,
-          angle: camDirec == CameraLensDirection.front ? 270 : 90,
-        );
+      print('[REG] portrait_bbox=$faceBox  cropSize=${cropped.width}x${cropped.height}');
 
-        final faceBox = faces[0].boundingBox;
-        if (faceBox.left < 0 ||
-            faceBox.top < 0 ||
-            faceBox.right > rotated.width ||
-            faceBox.bottom > rotated.height) {
-          isBusy = false;
-          return;
-        }
-
-        final cropped = img.copyCrop(
-          rotated,
-          x: faceBox.left.toInt(),
-          y: faceBox.top.toInt(),
-          width: faceBox.width.toInt(),
-          height: faceBox.height.toInt(),
-        );
-
-        // Check sharpness with small resized copy
-        if (_isFaceSharp(cropped)) {
-          _validFrameCount++;
-          if (_validFrameCount >= _requiredValidFrames && !getEmb) {
-            getEmb = true;
-            _validFrameCount = 0;
-            performFaceRecognition(faces[0], cropped);
-          }
-        } else {
+      if (_isFaceSharp(cropped)) {
+        _validFrameCount++;
+        print('[REG] Sharp frame! validFrameCount=$_validFrameCount/$_requiredValidFrames');
+        if (_validFrameCount >= _requiredValidFrames && !getEmb) {
+          getEmb = true;
           _validFrameCount = 0;
+          performFaceRecognition(face, cropped);
         }
       } else {
+        print('[REG] Face not sharp, skipping');
         _validFrameCount = 0;
       }
 
       isBusy = false;
-    } catch (e) {
-      print('Face detection error: $e');
+    } catch (e, st) {
+      print('Face detection error: $e\n$st');
       isBusy = false;
     }
   }
 
+  /// Transforms a bounding box from portrait (ML Kit) space back to
+  /// landscape (raw camera frame) space so we can crop before rotating.
+  ///
+  /// img.copyRotate(angle: 270) does 270° CCW:
+  ///   portrait(px,py) = (landscape_sy, landscapeW-1-landscape_sx)
+  ///   inverse: landscape_sx = landscapeW-1-py, landscape_sy = px
+  ///
+  /// img.copyRotate(angle: 90) does 90° CW:
+  ///   portrait(px,py) = (landscapeH-1-landscape_sy, landscape_sx)
+  ///   inverse: landscape_sx = py, landscape_sy = landscapeH-1-px
+  Rect _portraitBoxToLandscape(Rect p, int lsW, int lsH) {
+    if (camDirec == CameraLensDirection.front) {
+      // 270° CCW: landscape_sx = lsW-1-py,  landscape_sy = px
+      final left   = (lsW - 1 - p.bottom).clamp(0.0, (lsW - 1).toDouble());
+      final top    = p.left.clamp(0.0, (lsH - 1).toDouble());
+      final right  = (lsW - 1 - p.top).clamp(left + 1, lsW.toDouble());
+      final bottom = p.right.clamp(top + 1, lsH.toDouble());
+      return Rect.fromLTRB(left, top, right, bottom);
+    } else {
+      // 90° CW: landscape_sx = py, landscape_sy = lsH-1-px
+      final left   = p.top.clamp(0.0, (lsW - 1).toDouble());
+      final top    = (lsH - 1 - p.right).clamp(0.0, (lsH - 1).toDouble());
+      final right  = p.bottom.clamp(left + 1, lsW.toDouble());
+      final bottom = (lsH - 1 - p.left).clamp(top + 1, lsH.toDouble());
+      return Rect.fromLTRB(left, top, right, bottom);
+    }
+  }
+
+
   void performFaceRecognition(Face face, img.Image cropped) async {
-    if (!_recognizerReady) {
+    // Check recognizer.isReady directly — do NOT rely on _recognizerReady cache
+    // because initState() calls _initRecognizer() async without await, creating
+    // a race condition where setState may not have fired yet.
+    print('[REG] performFaceRecognition: isReady=${recognizer.isReady}, _recognizerReady=$_recognizerReady');
+    if (!recognizer.isReady) {
+      print('[REG] Recognizer not ready — waiting and retrying once...');
+      // Wait briefly and try once more in case model is mid-load
+      await Future.delayed(const Duration(milliseconds: 300));
+      if (!recognizer.isReady) {
+        print('[REG] Recognizer still not ready after wait. Aborting.');
+        isBusy = false;
+        getEmb = false;
+        return;
+      }
+    }
+    // Sync the state flag if it was stale
+    if (!_recognizerReady && mounted) {
+      setState(() => _recognizerReady = true);
+    }
+
+    try {
+      recognitions.clear();
+
+      // Store the first face (straight) as the profile image
+      if (_currentStep == 0) {
+        frontFace = cropped;
+      }
+
+      Recognition recognition = recognizer.recognize(cropped, face.boundingBox);
+
+      // NaN guard: jika model menghasilkan NaN, coba frame berikutnya
+      if (recognition.distance == -2) {
+        print('[REG] ⚠️ NaN embedding untuk step $_currentStep — retrying next frame');
+        if (mounted) {
+          setState(() {
+            isBusy = false;
+            getEmb = false;
+          });
+        } else {
+          isBusy = false;
+          getEmb = false;
+        }
+        return;
+      }
+
+      // Guard: if embedding is all zeros, model failed silently
+      final bool embValid = recognition.embeddings.any((v) => v != 0.0);
+      if (!embValid) {
+        print('[REG] WARNING: embedding is all zeros — model inference may have failed');
+      }
+
+      embeddings.add(recognition.embeddings);
+      print(
+        '[REG] ✅ Captured embedding ${embeddings.length}/${faceAngles.length} for step $_currentStep (${faceAngles[_currentStep]}) | emb[0]=${recognition.embeddings[0].toStringAsFixed(4)}',
+      );
+
+      if (!mounted) {
+        getEmb = false;
+        return;
+      }
+
+      setState(() {
+        if (_currentStep < faceAngles.length - 1) {
+          _currentStep++;
+        } else {
+          if (!dialogShown) {
+            showFaceRegistrationDialogue(frontFace!);
+          }
+        }
+        isBusy = false;
+        getEmb = false;
+      });
+    } catch (e, st) {
+      // CRITICAL: always reset getEmb so subsequent frames are not permanently blocked
+      print('[REG] performFaceRecognition ERROR: $e\n$st');
       if (mounted) {
         setState(() {
           isBusy = false;
+          getEmb = false;
         });
       } else {
         isBusy = false;
+        getEmb = false;
       }
-      return;
     }
-
-    recognitions.clear();
-
-    // Store the first face (straight) as the profile image
-    if (_currentStep == 0) {
-      frontFace = cropped;
-    }
-
-    Recognition recognition = recognizer.recognize(cropped, face.boundingBox);
-    embeddings.add(recognition.embeddings);
-
-    print(
-      'Captured embedding ${embeddings.length}/${faceAngles.length} for ${faceAngles[_currentStep]}',
-    );
-
-    if (!mounted) return;
-
-    setState(() {
-      if (_currentStep < faceAngles.length - 1) {
-        _currentStep++;
-      } else {
-        if (!dialogShown) {
-          showFaceRegistrationDialogue(frontFace!);
-        }
-      }
-      isBusy = false;
-      getEmb = false;
-    });
   }
 
   //TODO Face Registration Dialogue
@@ -424,13 +524,13 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       barrierDismissible: false,
       builder:
           (ctx) => AlertDialog(
-            title: const Text('Confirm Registration'),
+            title: const Text('Konfirmasi Pendaftaran'),
             content: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    'Captured ${embeddings.length} face angles',
+                    'Berhasil menangkap ${embeddings.length} sudut wajah',
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
                   const SizedBox(height: 16),
@@ -476,28 +576,55 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                   dialogShown = false;
                   Navigator.pop(context);
                 },
-                child: const Text('Retake'),
+                child: const Text('Ulangi'),
               ),
               FilledButton(
-                onPressed: () {
-                  recognizer.registerFaceInDB(
-                    userName,
-                    embeddings,
-                    Uint8List.fromList(img.encodeBmp(croppedFace)),
+                onPressed: () async {
+                  // Buat salinan data sebelum state direset
+                  final String name = userName;
+                  final List<List<double>> embs =
+                      List<List<double>>.from(embeddings);
+                  final Uint8List imgBytes = Uint8List.fromList(
+                    img.encodeBmp(croppedFace),
                   );
-                  _currentStep = 0;
-                  embeddings.clear();
-                  frontFace = null;
-                  dialogShown = false;
-                  Navigator.pop(context);
-                  Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Face Registered Successfully!'),
-                    ),
-                  );
+
+                  // Reset state
+                  setState(() {
+                    _currentStep = 0;
+                    embeddings.clear();
+                    frontFace = null;
+                    dialogShown = false;
+                  });
+
+                  // Tutup dialog
+                  if (mounted) Navigator.pop(context);
+
+                  // Simpan ke DB — await agar error tidak hilang
+                  try {
+                    await recognizer.registerFaceInDB(name, embs, imgBytes);
+                    if (mounted) {
+                      Navigator.pop(context); // Kembali ke HomeScreen
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('✅ Wajah berhasil didaftarkan!'),
+                          backgroundColor: Colors.green,
+                        ),
+                      );
+                    }
+                  } catch (e) {
+                    print('[REG] registerFaceInDB FAILED: $e');
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('❌ Gagal menyimpan wajah: $e'),
+                          backgroundColor: Colors.red,
+                          duration: const Duration(seconds: 6),
+                        ),
+                      );
+                    }
+                  }
                 },
-                child: const Text('Confirm'),
+                child: const Text('Konfirmasi'),
               ),
             ],
           ),
@@ -676,7 +803,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       displayedSize,
       screenSize,
     );
-    return CustomPaint(painter: painter);
+    return RepaintBoundary(child: CustomPaint(painter: painter));
   }
 
   //TODO toggle camera direction

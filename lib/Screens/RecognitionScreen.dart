@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
@@ -97,7 +98,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No cameras available on this device'),
+            content: Text('Kamera tidak tersedia di perangkat ini'),
             backgroundColor: Colors.red,
             duration: Duration(seconds: 5),
           ),
@@ -149,7 +150,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Camera initialization failed: $e'),
+            content: Text('Inisialisasi kamera gagal: $e'),
             backgroundColor: Colors.red,
             duration: const Duration(seconds: 5),
           ),
@@ -205,107 +206,96 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   Future<void> performFaceRecognition(List<Face> faces) async {
     try {
       if (!_recognizerReady) {
-        if (mounted) {
-          setState(() {
-            isBusy = false;
-          });
-        }
+        if (mounted) setState(() => isBusy = false);
         return;
       }
 
       recognitions.clear();
 
-      // Limit number of faces to process for better performance
-      final facesToProcess = faces.take(3).toList();
-
       if (frame == null) {
-        if (mounted) {
-          setState(() {
-            isBusy = false;
-          });
-        }
+        if (mounted) setState(() => isBusy = false);
         return;
       }
 
-      //TODO convert CameraImage to Image and rotate it so that our frame will be in a portrait
-      image =
-          Platform.isIOS
-              ? Util.convertBGRA8888ToImage(frame!)
-              : Util.convertNV21(frame!);
-
-      if (image == null) {
-        if (mounted) {
-          setState(() {
-            isBusy = false;
-          });
-        }
+      // Step 1: Convert NV21 → landscape (raw, no full rotation)
+      img.Image? originalImage;
+      if (Platform.isIOS) {
+        originalImage = await compute(Util.convertBGRA8888ToImage, frame!);
+      } else {
+        originalImage = await compute(Util.convertNV21, frame!);
+      }
+      if (originalImage == null) {
+        if (mounted) setState(() => isBusy = false);
         return;
       }
 
-      image = img.copyRotate(
-        image!,
-        angle: camDirec == CameraLensDirection.front ? 270 : 90,
-      );
+      for (Face face in faces.take(3)) {
+        // Step 2: Transform portrait bbox → landscape coordinates
+        final Rect lsBox = _portraitBoxToLandscape(
+          face.boundingBox, originalImage.width, originalImage.height,
+        );
 
-      for (Face face in facesToProcess) {
-        Rect faceRect = face.boundingBox;
+        final int left   = lsBox.left.clamp(0.0,  (originalImage.width  - 1).toDouble()).toInt();
+        final int top    = lsBox.top.clamp(0.0,   (originalImage.height - 1).toDouble()).toInt();
+        final int right  = lsBox.right.clamp((left + 1).toDouble(),  originalImage.width.toDouble()).toInt();
+        final int bottom = lsBox.bottom.clamp((top  + 1).toDouble(), originalImage.height.toDouble()).toInt();
+        final int cropW  = right - left;
+        final int cropH  = bottom - top;
 
-        // Validate face rect bounds
-        if (faceRect.left < 0 ||
-            faceRect.top < 0 ||
-            faceRect.right > image!.width ||
-            faceRect.bottom > image!.height) {
-          continue;
-        }
-
-        // Additional validation for crop dimensions
-        if (faceRect.width <= 0 || faceRect.height <= 0) {
-          continue;
-        }
+        if (cropW <= 0 || cropH <= 0) continue;
 
         try {
-          //TODO crop face
-          img.Image croppedFace = img.copyCrop(
-            image!,
-            x: faceRect.left.toInt(),
-            y: faceRect.top.toInt(),
-            width: faceRect.width.toInt(),
-            height: faceRect.height.toInt(),
+          // Step 3: Crop small region from landscape
+          final img.Image croppedLandscape = img.copyCrop(
+            originalImage, x: left, y: top, width: cropW, height: cropH,
           );
 
-          //TODO pass cropped face to face recognition model
-          Recognition recognition = recognizer.recognize(croppedFace, faceRect);
+          // Step 4: Rotate only the small crop
+          final img.Image croppedFace = img.copyRotate(
+            croppedLandscape,
+            angle: camDirec == CameraLensDirection.front ? 270 : 90,
+          );
 
-          if (recognition.distance < 1 && recognition.distance >= 0) {
-            recognitions.add(recognition);
-            print(
-              'Recognized: ${recognition.name} with distance: ${recognition.distance}',
-            );
-          } else {
-            recognition.name = "Unknown";
-            print('Face not recognized. Distance: ${recognition.distance}');
-          }
+          print('[REC] bbox=${face.boundingBox} cropSize=${croppedFace.width}x${croppedFace.height}');
+
+          Recognition recognition = recognizer.recognize(croppedFace, face.boundingBox);
+          print('[REC] name=${recognition.name} distance=${recognition.distance.toStringAsFixed(3)}');
+
+          if (recognition.distance >= 0) recognitions.add(recognition);
         } catch (e) {
-          print('Error processing face: $e');
-          continue;
+          print('[REC] Error processing face: $e');
         }
       }
 
       if (mounted) {
         setState(() {
           isBusy = false;
-          _scanResults = recognitions;
+          _scanResults = List.from(recognitions);
         });
       }
     } catch (e) {
-      print('Error in face recognition: $e');
-      if (mounted) {
-        setState(() {
-          isBusy = false;
-        });
-      }
+      print('[REC] Error in face recognition: $e');
+      if (mounted) setState(() => isBusy = false);
     }
   }
+
+  /// Same coordinate transform as RegistrationScreen.
+  Rect _portraitBoxToLandscape(Rect p, int lsW, int lsH) {
+    if (camDirec == CameraLensDirection.front) {
+      final left   = (lsW - 1 - p.bottom).clamp(0.0, (lsW - 1).toDouble());
+      final top    = p.left.clamp(0.0, (lsH - 1).toDouble());
+      final right  = (lsW - 1 - p.top).clamp(left + 1, lsW.toDouble());
+      final bottom = p.right.clamp(top + 1, lsH.toDouble());
+      return Rect.fromLTRB(left, top, right, bottom);
+    } else {
+      final left   = p.top.clamp(0.0, (lsW - 1).toDouble());
+      final top    = (lsH - 1 - p.right).clamp(0.0, (lsH - 1).toDouble());
+      final right  = p.bottom.clamp(left + 1, lsW.toDouble());
+      final bottom = (lsH - 1 - p.left).clamp(top + 1, lsH.toDouble());
+      return Rect.fromLTRB(left, top, right, bottom);
+    }
+  }
+
 
   // //TODO convert CameraImage to InputImage
   final _orientations = {
@@ -402,7 +392,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       displayedSize,
       screenSize,
     );
-    return CustomPaint(painter: painter);
+    return RepaintBoundary(child: CustomPaint(painter: painter));
   }
 
   //TODO toggle camera direction
@@ -412,7 +402,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No cameras available on this device'),
+            content: Text('Kamera tidak tersedia di perangkat ini'),
             backgroundColor: Colors.red,
           ),
         );
@@ -425,7 +415,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Only one camera available on this device'),
+            content: Text('Hanya satu kamera yang tersedia di perangkat ini'),
             backgroundColor: Colors.orange,
           ),
         );
@@ -469,7 +459,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Failed to switch camera: $e'),
+            content: Text('Gagal mengganti kamera: $e'),
             backgroundColor: Colors.red,
           ),
         );
@@ -526,7 +516,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
           child: FilledButton.tonalIcon(
             onPressed: () => Navigator.pop(context),
             icon: const Icon(Icons.arrow_back_rounded),
-            label: const Text('Back'),
+            label: const Text('Kembali'),
           ),
         ),
       ),
@@ -546,7 +536,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
             ),
             onPressed: _toggleCameraDirection,
             icon: const Icon(Icons.flip_camera_android_rounded, size: 28),
-            label: const Text('Flip Camera', style: TextStyle(fontSize: 16)),
+            label: const Text('Balik Kamera', style: TextStyle(fontSize: 16)),
           ),
         ),
       ),

@@ -25,7 +25,7 @@ class HomeScreen extends StatelessWidget {
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 20),
               child: Text(
-                "Face Recognition Attendance",
+                "Sistem Absensi Pengenalan Wajah",
                 style: theme.textTheme.headlineSmall?.copyWith(
                   fontWeight: FontWeight.bold,
                   color: colorScheme.onSurface,
@@ -66,8 +66,8 @@ class HomeScreen extends StatelessWidget {
                           color: colorScheme.onPrimaryContainer,
                         ),
                       ),
-                      title: const Text("Register New Face"),
-                      subtitle: const Text("Capture and store a new user face"),
+                      title: const Text("Daftar Wajah Baru"),
+                      subtitle: const Text("Ambil dan simpan data wajah pengguna baru"),
                       trailing: const Icon(Icons.arrow_forward_ios_rounded),
                       onTap:
                           () => Navigator.push(
@@ -88,9 +88,9 @@ class HomeScreen extends StatelessWidget {
                           color: colorScheme.onSecondaryContainer,
                         ),
                       ),
-                      title: const Text("Recognize Face"),
+                      title: const Text("Deteksi Wajah"),
                       subtitle: const Text(
-                        "Identify registered faces in real-time",
+                        "Identifikasi wajah terdaftar secara real-time",
                       ),
                       trailing: const Icon(Icons.arrow_forward_ios_rounded),
                       onTap:
@@ -112,8 +112,8 @@ class HomeScreen extends StatelessWidget {
                           color: colorScheme.onTertiaryContainer,
                         ),
                       ),
-                      title: const Text("Registered Faces"),
-                      subtitle: const Text("View all stored face data"),
+                      title: const Text("Wajah Terdaftar"),
+                      subtitle: const Text("Lihat semua data wajah yang tersimpan"),
                       trailing: const Icon(Icons.arrow_forward_ios_rounded),
                       onTap:
                           () => Navigator.push(
@@ -135,7 +135,7 @@ class HomeScreen extends StatelessWidget {
               child: Column(
                 children: [
                   Text(
-                    '© 2026 Face Recognition Attendance',
+                    '© 2026 Sistem Absensi Pengenalan Wajah',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                       fontWeight: FontWeight.w500,
