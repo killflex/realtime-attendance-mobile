@@ -1,8 +1,8 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 
-import '../DB/DatabaseHelper.dart';
+import '../data/face_record.dart';
+import '../data/face_repository.dart';
+import '../di/service_locator.dart';
 
 class RegisteredFacesScreen extends StatefulWidget {
   const RegisteredFacesScreen({super.key});
@@ -12,8 +12,8 @@ class RegisteredFacesScreen extends StatefulWidget {
 }
 
 class _RegisteredFacesScreenState extends State<RegisteredFacesScreen> {
-  final dbHelper = DatabaseHelper();
-  List<Map<String, dynamic>> faces = [];
+  final FaceRepository _faceRepository = getIt<FaceRepository>();
+  List<FaceRecord> faces = [];
 
   @override
   void initState() {
@@ -22,15 +22,14 @@ class _RegisteredFacesScreenState extends State<RegisteredFacesScreen> {
   }
 
   Future<void> loadFaces() async {
-    await dbHelper.init();
-    final data = await dbHelper.queryAllRows();
+    final data = await _faceRepository.getAllFaces();
     setState(() {
       faces = data;
     });
   }
 
   Future<void> deleteFace(int id) async {
-    await dbHelper.delete(id);
+    await _faceRepository.deleteFace(id);
     loadFaces();
   }
 
@@ -95,7 +94,8 @@ class _RegisteredFacesScreenState extends State<RegisteredFacesScreen> {
                 padding: const EdgeInsets.all(16),
                 itemBuilder: (context, index) {
                   final face = faces[index];
-                  Uint8List? imageBytes = face[DatabaseHelper.columnImage];
+                  final imageBytes = face.imageBytes;
+                  final faceId = face.id ?? -1;
 
                   return Card.outlined(
                     margin: const EdgeInsets.only(bottom: 12),
@@ -103,42 +103,29 @@ class _RegisteredFacesScreenState extends State<RegisteredFacesScreen> {
                       contentPadding: const EdgeInsets.all(12),
                       leading: ClipRRect(
                         borderRadius: BorderRadius.circular(8),
-                        child:
-                            imageBytes != null
-                                ? Image.memory(
-                                  imageBytes,
-                                  width: 56,
-                                  height: 56,
-                                  fit: BoxFit.cover,
-                                )
-                                : CircleAvatar(
-                                  radius: 28,
-                                  backgroundColor:
-                                      colorScheme.surfaceContainerHighest,
-                                  child: Icon(
-                                    Icons.person,
-                                    size: 32,
-                                    color: colorScheme.onSurfaceVariant,
-                                  ),
-                                ),
+                        child: Image.memory(
+                          imageBytes,
+                          width: 56,
+                          height: 56,
+                          fit: BoxFit.cover,
+                        ),
                       ),
                       title: Text(
-                        face[DatabaseHelper.columnName] ?? '',
+                        face.name,
                         style: theme.textTheme.titleMedium?.copyWith(
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      subtitle: Text('ID: ${face[DatabaseHelper.columnId]}'),
+                      subtitle: Text('ID: ${faceId == -1 ? '-' : faceId}'),
                       trailing: IconButton(
                         icon: Icon(
                           Icons.delete_rounded,
                           color: colorScheme.error,
                         ),
                         onPressed:
-                            () => _confirmDelete(
-                              context,
-                              face[DatabaseHelper.columnId],
-                            ),
+                            faceId == -1
+                                ? null
+                                : () => _confirmDelete(context, faceId),
                       ),
                     ),
                   );
@@ -149,7 +136,6 @@ class _RegisteredFacesScreenState extends State<RegisteredFacesScreen> {
 
   @override
   void dispose() {
-    dbHelper.close();
     super.dispose();
   }
 }

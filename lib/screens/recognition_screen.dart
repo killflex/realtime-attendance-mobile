@@ -7,10 +7,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:image/image.dart' as img;
-import 'package:realtime_attendance_mobile/ML/Recognizer.dart';
-import 'package:realtime_attendance_mobile/Util.dart';
+import 'package:realtime_attendance_mobile/di/service_locator.dart';
+import 'package:realtime_attendance_mobile/logging/app_logger.dart';
+import 'package:realtime_attendance_mobile/machinelearning/recognizer.dart';
+import 'package:realtime_attendance_mobile/util.dart';
 
-import '../ML/Recognition.dart';
+import '../machinelearning/recognition.dart';
 import '../main.dart';
 
 class RecognitionScreen extends StatefulWidget {
@@ -21,6 +23,7 @@ class RecognitionScreen extends StatefulWidget {
 }
 
 class _RecognitionScreenState extends State<RecognitionScreen> {
+  final AppLogger _log = AppLogger();
   CameraController? controller;
   bool isBusy = false;
   late Size size;
@@ -51,8 +54,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
     _initializeCameraDescription();
 
     //TODO initialize face detector
-    final options = FaceDetectorOptions(performanceMode: FaceDetectorMode.fast);
-    faceDetector = FaceDetector(options: options);
+    faceDetector = getIt<FaceDetector>();
 
     //TODO initialize face recognizer
     _initRecognizer();
@@ -62,7 +64,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   }
 
   Future<void> _initRecognizer() async {
-    recognizer = Recognizer(numThreads: 2);
+    recognizer = getIt<Recognizer>();
     await recognizer.init();
     if (!mounted) return;
     setState(() {
@@ -73,7 +75,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   void _initializeCameraDescription() {
     // Check if cameras are available
     if (cameras.isEmpty) {
-      print('No cameras available on this device');
+      _log.w('No cameras available on this device');
       return;
     }
 
@@ -85,7 +87,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       );
       camDirec = description.lensDirection;
     } catch (e) {
-      print('Error initializing camera: $e');
+      _log.e('Error initializing camera', e);
       description = cameras.first;
       camDirec = description.lensDirection;
     }
@@ -146,7 +148,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
         }
       });
     } catch (e) {
-      print('Error initializing camera: $e');
+      _log.e('Error initializing camera', e);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -163,8 +165,6 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   @override
   void dispose() {
     controller?.dispose();
-    faceDetector.close();
-    recognizer.close();
     super.dispose();
   }
 
@@ -187,12 +187,12 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
 
       //TODO pass InputImage to face detection model and detect faces
       final faces = await faceDetector.processImage(inputImage);
-      print(" Detected Faces: ${faces.length} ");
+      _log.d('Detected faces: ${faces.length}');
 
       //TODO perform face recognition on detected faces
       await performFaceRecognition(faces);
     } catch (e) {
-      print('Error in face detection: $e');
+      _log.e('Error in face detection', e);
       if (mounted) {
         setState(() {
           isBusy = false;
@@ -232,22 +232,36 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       for (Face face in faces.take(3)) {
         // Step 2: Transform portrait bbox → landscape coordinates
         final Rect lsBox = _portraitBoxToLandscape(
-          face.boundingBox, originalImage.width, originalImage.height,
+          face.boundingBox,
+          originalImage.width,
+          originalImage.height,
         );
 
-        final int left   = lsBox.left.clamp(0.0,  (originalImage.width  - 1).toDouble()).toInt();
-        final int top    = lsBox.top.clamp(0.0,   (originalImage.height - 1).toDouble()).toInt();
-        final int right  = lsBox.right.clamp((left + 1).toDouble(),  originalImage.width.toDouble()).toInt();
-        final int bottom = lsBox.bottom.clamp((top  + 1).toDouble(), originalImage.height.toDouble()).toInt();
-        final int cropW  = right - left;
-        final int cropH  = bottom - top;
+        final int left =
+            lsBox.left.clamp(0.0, (originalImage.width - 1).toDouble()).toInt();
+        final int top =
+            lsBox.top.clamp(0.0, (originalImage.height - 1).toDouble()).toInt();
+        final int right =
+            lsBox.right
+                .clamp((left + 1).toDouble(), originalImage.width.toDouble())
+                .toInt();
+        final int bottom =
+            lsBox.bottom
+                .clamp((top + 1).toDouble(), originalImage.height.toDouble())
+                .toInt();
+        final int cropW = right - left;
+        final int cropH = bottom - top;
 
         if (cropW <= 0 || cropH <= 0) continue;
 
         try {
           // Step 3: Crop small region from landscape
           final img.Image croppedLandscape = img.copyCrop(
-            originalImage, x: left, y: top, width: cropW, height: cropH,
+            originalImage,
+            x: left,
+            y: top,
+            width: cropW,
+            height: cropH,
           );
 
           // Step 4: Rotate only the small crop
@@ -256,14 +270,21 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
             angle: camDirec == CameraLensDirection.front ? 270 : 90,
           );
 
-          print('[REC] bbox=${face.boundingBox} cropSize=${croppedFace.width}x${croppedFace.height}');
+          _log.d(
+            '[REC] bbox=${face.boundingBox} cropSize=${croppedFace.width}x${croppedFace.height}',
+          );
 
-          Recognition recognition = recognizer.recognize(croppedFace, face.boundingBox);
-          print('[REC] name=${recognition.name} distance=${recognition.distance.toStringAsFixed(3)}');
+          Recognition recognition = recognizer.recognize(
+            croppedFace,
+            face.boundingBox,
+          );
+          _log.d(
+            '[REC] name=${recognition.name} distance=${recognition.distance.toStringAsFixed(3)}',
+          );
 
           if (recognition.distance >= 0) recognitions.add(recognition);
         } catch (e) {
-          print('[REC] Error processing face: $e');
+          _log.e('[REC] Error processing face', e);
         }
       }
 
@@ -274,7 +295,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
         });
       }
     } catch (e) {
-      print('[REC] Error in face recognition: $e');
+      _log.e('[REC] Error in face recognition', e);
       if (mounted) setState(() => isBusy = false);
     }
   }
@@ -282,20 +303,19 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   /// Same coordinate transform as RegistrationScreen.
   Rect _portraitBoxToLandscape(Rect p, int lsW, int lsH) {
     if (camDirec == CameraLensDirection.front) {
-      final left   = (lsW - 1 - p.bottom).clamp(0.0, (lsW - 1).toDouble());
-      final top    = p.left.clamp(0.0, (lsH - 1).toDouble());
-      final right  = (lsW - 1 - p.top).clamp(left + 1, lsW.toDouble());
+      final left = (lsW - 1 - p.bottom).clamp(0.0, (lsW - 1).toDouble());
+      final top = p.left.clamp(0.0, (lsH - 1).toDouble());
+      final right = (lsW - 1 - p.top).clamp(left + 1, lsW.toDouble());
       final bottom = p.right.clamp(top + 1, lsH.toDouble());
       return Rect.fromLTRB(left, top, right, bottom);
     } else {
-      final left   = p.top.clamp(0.0, (lsW - 1).toDouble());
-      final top    = (lsH - 1 - p.right).clamp(0.0, (lsH - 1).toDouble());
-      final right  = p.bottom.clamp(left + 1, lsW.toDouble());
+      final left = p.top.clamp(0.0, (lsW - 1).toDouble());
+      final top = (lsH - 1 - p.right).clamp(0.0, (lsH - 1).toDouble());
+      final right = p.bottom.clamp(left + 1, lsW.toDouble());
       final bottom = (lsH - 1 - p.left).clamp(top + 1, lsH.toDouble());
       return Rect.fromLTRB(left, top, right, bottom);
     }
   }
-
 
   // //TODO convert CameraImage to InputImage
   final _orientations = {
@@ -455,7 +475,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       setState(() {});
       await initializeCamera();
     } catch (e) {
-      print('Error toggling camera: $e');
+      _log.e('Error toggling camera', e);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -531,7 +551,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
           child: FilledButton.icon(
             style: FilledButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              backgroundColor: Colors.white.withOpacity(0.9),
+              backgroundColor: Colors.white.withValues(alpha: 0.9),
               foregroundColor: Colors.black,
             ),
             onPressed: _toggleCameraDirection,
@@ -589,7 +609,7 @@ class FaceDetectorPainter extends CustomPainter {
     final Paint labelBgPaint =
         Paint()
           ..style = PaintingStyle.fill
-          ..color = const Color(0xFF212121).withOpacity(0.85);
+          ..color = const Color(0xFF212121).withValues(alpha: 0.85);
 
     for (final face in faces) {
       final double left =

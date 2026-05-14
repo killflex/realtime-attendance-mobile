@@ -9,3 +9,4 @@ class Recognition {
   Recognition(this.name, this.location,this.embeddings,this.distance);
 
 }
+

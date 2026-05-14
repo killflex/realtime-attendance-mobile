@@ -1,19 +1,41 @@
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:realtime_attendance_mobile/Screens/HomeScreen.dart';
+import 'package:flutter/services.dart';
+import 'package:realtime_attendance_mobile/di/service_locator.dart';
+import 'package:realtime_attendance_mobile/logging/app_logger.dart';
+import 'package:realtime_attendance_mobile/screens/error_screen.dart';
+import 'package:realtime_attendance_mobile/screens/home_screen.dart';
 
 late List<CameraDescription> cameras;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await setupLocator();
+  final log = getIt<AppLogger>();
 
   try {
     cameras = await availableCameras();
     if (cameras.isEmpty) {
-      print('Warning: No cameras available on this device');
+      log.w('No cameras available on this device');
+
+      runApp(
+        MaterialApp(
+          home: ErrorScreen.cameraError(
+            onRetry: () {
+              // Reload aplikasi
+              runApp(const MyApp());
+            },
+            onBack: () {
+              // Keluar dari aplikasi
+              SystemNavigator.pop();
+            },
+          ),
+        ),
+      );
+      return;
     }
   } catch (e) {
-    print('Error initializing cameras: $e');
+    log.e('Error initializing cameras', e);
     cameras =
         []; // Initialize with empty list to prevent LateInitializationError
   }

@@ -32,9 +32,9 @@ A Flutter mobile application for real-time face recognition-based attendance tra
 
 ## Project Structure
 
-- `lib/Screens` - UI screens (Home, Registration, Recognition, Registered Faces)
-- `lib/ML` - Machine learning components (Recognizer, Recognition models)
-- `lib/DB` - Database helper for SQLite operations
+- `lib/screens` - UI screens (Home, Registration, Recognition, Registered Faces)
+- `lib/machinelearning` - Machine learning components (Recognizer, Recognition models)
+- `lib/database` - Database helper for SQLite operations
 - `assets` - FaceNet TFLite model
 
 ## Requirements

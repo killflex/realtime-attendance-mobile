@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -6,29 +5,33 @@ import 'dart:ui';
 import 'package:image/image.dart' as img;
 import 'package:tflite_flutter/tflite_flutter.dart';
 
-import '../DB/DatabaseHelper.dart';
-import 'Recognition.dart';
+import '../data/face_record.dart';
+import '../data/face_repository.dart';
+import '../logging/app_logger.dart';
+import 'recognition.dart';
 
 class Recognizer {
   Interpreter? _interpreter;
   late InterpreterOptions _interpreterOptions;
-  static const int inputWidth = 160;
-  static const int inputHeight = 160;
-  static const int outputSize = 512;
-  final dbHelper = DatabaseHelper();
+  static const int inputWidth = 112;
+  static const int inputHeight = 112;
+  static const int outputSize = 128;
+  final FaceRepository _faceRepository;
+  final AppLogger _log = AppLogger();
   Map<String, List<List<double>>> registered = {};
 
   // Cache untuk optimasi
 
-  String get modelName => 'assets/facenet.tflite';
-  // TODO: switch to 'assets/mobilefacenet_f32.tflite' (112x112, 128-dim)
-  // after re-exporting without mixed_float16 (see notebook fix below)
+  String get modelName => 'assets/mobilefacenet_f32.tflite';
 
   bool _isLoaded = false;
+  Future<void>? _initFuture;
+  bool _isRunning = false;
 
   bool get isReady => _isLoaded && _interpreter != null;
 
-  Recognizer({int? numThreads}) {
+  Recognizer({required FaceRepository faceRepository, int? numThreads})
+    : _faceRepository = faceRepository {
     _interpreterOptions = InterpreterOptions();
 
     if (numThreads != null) {
@@ -38,40 +41,34 @@ class Recognizer {
   }
 
   Future<void> init() async {
+    _initFuture ??= _initInternal();
+    return _initFuture!;
+  }
+
+  Future<void> _initInternal() async {
     await loadModel();
     try {
       await initDB();
     } catch (e, st) {
       // DB init failure is non-fatal: model inference still works
       // Registered faces just won't be loaded from DB
-      print('[Recognizer] initDB error (non-fatal, continuing): $e\n$st');
+      _log.w('Recognizer initDB error (non-fatal, continuing).', e, st);
     }
   }
 
   initDB() async {
-    await dbHelper.init();
+    await _faceRepository.init();
     loadRegisteredFaces();
   }
 
   Future<void> loadRegisteredFaces() async {
     registered.clear();
-    final allRows = await dbHelper.queryAllRows();
-    // debugPrint('query all rows:');
-    for (final row in allRows) {
-      //  debugPrint(row.toString());
-      print(row[DatabaseHelper.columnName]);
-      String name = row[DatabaseHelper.columnName];
-      String embeddingJson = row[DatabaseHelper.columnEmbedding];
-
-      // Parse JSON array of embeddings (multiple angles)
-      List<dynamic> parsedJson = jsonDecode(embeddingJson);
-      List<List<double>> embd =
-          parsedJson
-              .map((e) => (e as List<dynamic>).map((v) => v as double).toList())
-              .toList();
-
-      registered[name] = embd;
-      print('Loaded ${embd.length} embeddings for $name');
+    final records = await _faceRepository.getAllFaces();
+    for (final record in records) {
+      registered[record.name] = record.embeddings;
+      _log.d(
+        'Loaded ${record.embeddings.length} embeddings for ${record.name}',
+      );
     }
   }
 
@@ -101,40 +98,33 @@ class Recognizer {
     List<List<double>> embeddings,
     Uint8List faceImage,
   ) async {
-    // Ensure DB is open — idempotent: if already open, returns immediately
-    await dbHelper.init();
-
-    final String embeddingJson = jsonEncode(embeddings);
     final Uint8List compressedImage = await compressImage(faceImage);
-
-    final Map<String, dynamic> row = {
-      DatabaseHelper.columnName: name,
-      DatabaseHelper.columnEmbedding: embeddingJson,
-      DatabaseHelper.columnImage: compressedImage,
-    };
-
-    final int id = await dbHelper.insert(row);
-    print('[Recognizer] ✅ Registered "$name" → DB id=$id  embeddings=${embeddings.length}');
+    final record = FaceRecord(
+      name: name,
+      embeddings: embeddings,
+      imageBytes: compressedImage,
+    );
+    final int id = await _faceRepository.insertFace(record);
+    _log.i('Registered "$name" to DB id=$id embeddings=${embeddings.length}');
 
     // Reload in-memory map so recognition works immediately after registration
     await loadRegisteredFaces();
   }
 
-
   Future<void> loadModel() async {
     try {
-      print('[Recognizer] Loading model: $modelName');
+      _log.i('Loading model: $modelName');
       _interpreter = await Interpreter.fromAsset(
         modelName,
         options: _interpreterOptions,
       );
       _isLoaded = true;
-      print(
-        '[Recognizer] ✅ Model loaded. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
+      _log.i(
+        'Model loaded. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
       );
     } catch (e, st) {
       _isLoaded = false;
-      print('[Recognizer] ❌ Failed to load model "$modelName": $e\n$st');
+      _log.e('Failed to load model "$modelName".', e, st);
     }
   }
 
@@ -167,34 +157,56 @@ class Recognizer {
       return Recognition('Unknown', location, List.filled(outputSize, 0.0), -1);
     }
 
-    var input = imageToArray(image);
-    print('Input shape: ${input.shape}');
+    if (_isRunning) {
+      _log.w('Recognizer busy - skipping frame');
+      return Recognition(
+        '__busy__',
+        location,
+        List.filled(outputSize, 0.0),
+        -3,
+      );
+    }
 
-    // CRITICAL: output buffer MUST be a List<List<double>> — int or bare list causes silent failure
-    final List<List<double>> output = [List.filled(outputSize, 0.0)];
+    _isRunning = true;
+    List<double> outputArray;
+    int run;
+    try {
+      var input = imageToArray(image);
+      _log.d('Input shape: ${input.shape}');
 
-    //TODO performs inference
-    final runs = DateTime.now().millisecondsSinceEpoch;
-    _interpreter!.run(input, output);
-    final run = DateTime.now().millisecondsSinceEpoch - runs;
+      // CRITICAL: output buffer MUST be a List<List<double>> — int or bare list causes silent failure
+      final List<List<double>> output = [List.filled(outputSize, 0.0)];
 
-    List<double> outputArray = output[0];
+      //TODO performs inference
+      final runs = DateTime.now().millisecondsSinceEpoch;
+      _interpreter!.run(input, output);
+      run = DateTime.now().millisecondsSinceEpoch - runs;
+
+      outputArray = output[0];
+    } finally {
+      _isRunning = false;
+    }
 
     // Guard: NaN/Inf embedding means model failed for this crop (bad input region)
     final bool hasNaN = outputArray.any((v) => v.isNaN || v.isInfinite);
     if (hasNaN) {
-      print('[Recognizer] ⚠️ NaN/Inf in embedding — invalid crop or model issue. Skipping.');
+      _log.w('NaN/Inf in embedding - invalid crop or model issue. Skipping.');
       // distance = -2 signals "bad embedding" to callers (distinct from -5 = no DB)
-      return Recognition('__invalid__', location, List.filled(outputSize, 0.0), -2);
+      return Recognition(
+        '__invalid__',
+        location,
+        List.filled(outputSize, 0.0),
+        -2,
+      );
     }
 
-    print(
+    _log.d(
       'Inference time: ${run}ms | embedding[0..4]: ${outputArray.sublist(0, 4).map((v) => v.toStringAsFixed(4))}',
     );
 
     //TODO looks for the nearest embeeding in the database and returns the pair
     Pair pair = findNearest(outputArray);
-    print('distance= ${pair.distance}');
+    _log.d('Distance: ${pair.distance}');
 
     return Recognition(pair.name, location, outputArray, pair.distance);
   }
@@ -237,9 +249,9 @@ class Recognizer {
       }
     }
 
-    // FaceNet L2-normalized: threshold 1.0 (Euclidean on unit sphere 0–2)
-    // Switch to 0.8 when using mobilefacenet_f32.tflite
-    if (pair.distance > 1.0 && pair.distance != -5) {
+    // MobileFaceNet L2-normalized: Euclidean distance range 0-2.
+    // Threshold 0.8 = cosine similarity ~0.68
+    if (pair.distance > 0.6 && pair.distance != -5) {
       pair.name = "Unknown";
     }
 

@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:math';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -7,11 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:image/image.dart' as img;
-import 'package:realtime_attendance_mobile/ML/Recognizer.dart';
-import 'package:realtime_attendance_mobile/Screens/HomeScreen.dart';
-import 'package:realtime_attendance_mobile/Util.dart';
+import 'package:realtime_attendance_mobile/di/service_locator.dart';
+import 'package:realtime_attendance_mobile/logging/app_logger.dart';
+import 'package:realtime_attendance_mobile/machinelearning/recognizer.dart';
+import 'package:realtime_attendance_mobile/screens/home_screen.dart';
+import 'package:realtime_attendance_mobile/util.dart';
 
-import '../ML/Recognition.dart';
+import '../machinelearning/recognition.dart';
 import '../main.dart';
 
 class RegistrationScreen extends StatefulWidget {
@@ -22,6 +23,7 @@ class RegistrationScreen extends StatefulWidget {
 }
 
 class _RegistrationScreenState extends State<RegistrationScreen> {
+  final AppLogger _log = AppLogger();
   // Page Controller for two-step process
   final PageController _pageController = PageController();
   int _currentPage = 0;
@@ -63,6 +65,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   //TODO declare face recognizer
   late Recognizer recognizer;
   bool _recognizerReady = false;
+  Future<void>? _recognizerInit;
 
   // Performance optimization
   DateTime? _lastProcessedTime;
@@ -71,10 +74,12 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   ); // Slower for registration
   int _skipFrameCount = 0;
   static const _skipFrames = 3; // Skip more frames during registration
+  static const int _minFaceSizePx = 60;
 
   int _currentStep = 0;
   int _validFrameCount = 0;
-  final int _requiredValidFrames = 1; // 1 sharp frame is enough; throttling already limits rate
+  final int _requiredValidFrames =
+      1; // 1 sharp frame is enough; throttling already limits rate
 
   List<String> faceAngles = ["straight", "right", "left", "down", "up"];
 
@@ -112,32 +117,39 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     _initializeCameraDescription();
 
     //TODO initialize face detector
-    final options = FaceDetectorOptions(performanceMode: FaceDetectorMode.fast);
-    faceDetector = FaceDetector(options: options);
+    faceDetector = getIt<FaceDetector>();
 
     //TODO initialize face recognizer
-    _initRecognizer();
+    _recognizerInit = _initRecognizer();
 
     // Camera will be initialized when moving to Step 2
   }
 
   Future<void> _initRecognizer() async {
-    print('[REG] _initRecognizer: start');
+    _log.d('[REG] _initRecognizer: start');
     try {
-      recognizer = Recognizer(numThreads: 2);
-      print('[REG] _initRecognizer: Recognizer object created, calling init()...');
+      recognizer = getIt<Recognizer>();
+      _log.d(
+        '[REG] _initRecognizer: Recognizer object created, calling init()...',
+      );
       await recognizer.init();
-      print('[REG] _initRecognizer: init() complete. isReady=${recognizer.isReady}');
+      _log.d(
+        '[REG] _initRecognizer: init() complete. isReady=${recognizer.isReady}',
+      );
       if (!mounted) {
-        print('[REG] _initRecognizer: widget not mounted after init — skipping setState');
+        _log.d(
+          '[REG] _initRecognizer: widget not mounted after init - skipping setState',
+        );
         return;
       }
       setState(() {
         _recognizerReady = recognizer.isReady;
       });
-      print('[REG] _initRecognizer: _recognizerReady set to $_recognizerReady');
+      _log.d(
+        '[REG] _initRecognizer: _recognizerReady set to $_recognizerReady',
+      );
     } catch (e, st) {
-      print('[REG] _initRecognizer ERROR: $e\n$st');
+      _log.e('[REG] _initRecognizer error', e, st);
     }
   }
 
@@ -151,7 +163,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       );
       camDirec = description.lensDirection;
     } catch (e) {
-      print('Error initializing camera: $e');
+      _log.e('Error initializing camera', e);
       if (cameras.isNotEmpty) {
         description = cameras.first;
         camDirec = description.lensDirection;
@@ -167,8 +179,6 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     _phoneController.dispose();
     _emailController.dispose();
     controller?.dispose();
-    faceDetector.close();
-    recognizer.close();
     super.dispose();
   }
 
@@ -251,7 +261,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         }
       });
     } catch (e) {
-      print('Camera init error: $e');
+      _log.e('Camera init error', e);
       if (mounted) {
         ScaffoldMessenger.of(
           context,
@@ -277,6 +287,12 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       }
       final double mean = sumLuma / total;
 
+      // GUARD: Tolak frame jika terlalu gelap (Auto-exposure belum stabil)
+      if (mean < 50) {
+        _log.d('[REG] Face is too dark (mean luma=${mean.toStringAsFixed(1)} < 50)');
+        return false;
+      }
+
       double variance = 0.0;
       for (int y = 0; y < resized.height; y++) {
         for (int x = 0; x < resized.width; x++) {
@@ -287,10 +303,12 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       }
       variance /= total;
 
-      print('[REG] sharpness variance=${variance.toStringAsFixed(1)} (threshold=50)');
+      _log.d(
+        '[REG] sharpness variance=${variance.toStringAsFixed(1)} (threshold=50), luma=${mean.toStringAsFixed(1)}',
+      );
       return variance > 50; // Lowered threshold — mobile cameras are generally adequate
     } catch (e) {
-      print('[REG] Sharpness check error: $e — assuming sharp');
+      _log.w('[REG] Sharpness check error - assuming sharp', e);
       return true;
     }
   }
@@ -316,23 +334,41 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   //TODO face detection on a frame
   Future<void> doFaceDetectionOnFrame() async {
     try {
-      if (frame == null || controller == null) { isBusy = false; return; }
+      if (frame == null || controller == null) {
+        isBusy = false;
+        return;
+      }
 
       InputImage? inputImage = getInputImage();
-      if (inputImage == null) { isBusy = false; return; }
+      if (inputImage == null) {
+        isBusy = false;
+        return;
+      }
 
       List<Face> faces = await faceDetector.processImage(inputImage);
       if (mounted) setState(() => _scanResults = faces);
 
-      print('[REG] faces=${faces.length}, step=$_currentStep, validFrames=$_validFrameCount');
+      _log.d(
+        '[REG] faces=${faces.length}, step=$_currentStep, validFrames=$_validFrameCount',
+      );
 
-      if (faces.isEmpty) { _validFrameCount = 0; isBusy = false; return; }
+      if (faces.isEmpty) {
+        _validFrameCount = 0;
+        isBusy = false;
+        return;
+      }
 
       final face = faces[0];
       final aligned = _isFaceProperlyAligned(face, _currentStep);
-      print('[REG] aligned=$aligned eulerY=${face.headEulerAngleY?.toStringAsFixed(1)} eulerX=${face.headEulerAngleX?.toStringAsFixed(1)}');
+      _log.d(
+        '[REG] aligned=$aligned eulerY=${face.headEulerAngleY?.toStringAsFixed(1)} eulerX=${face.headEulerAngleX?.toStringAsFixed(1)}',
+      );
 
-      if (!aligned) { _validFrameCount = 0; isBusy = false; return; }
+      if (!aligned) {
+        _validFrameCount = 0;
+        isBusy = false;
+        return;
+      }
 
       // Step 1: Convert NV21 → landscape image (raw, no rotation)
       img.Image? tempImage;
@@ -341,31 +377,55 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       } else {
         tempImage = await compute(Util.convertNV21, frame!);
       }
-      if (tempImage == null) { isBusy = false; return; }
+      if (tempImage == null) {
+        isBusy = false;
+        return;
+      }
 
       // Step 2: Transform ML Kit portrait bbox → landscape coordinates
       // ML Kit returns bbox in portrait (rotated) space. Transform back to avoid
       // rotating the full ~3MB frame — instead we only rotate the small crop.
       final faceBox = face.boundingBox;
       final Rect lsBox = _portraitBoxToLandscape(
-        faceBox, tempImage.width, tempImage.height,
+        faceBox,
+        tempImage.width,
+        tempImage.height,
       );
 
-      final int left   = lsBox.left.clamp(0.0,  (tempImage.width  - 1).toDouble()).toInt();
-      final int top    = lsBox.top.clamp(0.0,   (tempImage.height - 1).toDouble()).toInt();
-      final int right  = lsBox.right.clamp((left + 1).toDouble(),  tempImage.width.toDouble()).toInt();
-      final int bottom = lsBox.bottom.clamp((top  + 1).toDouble(), tempImage.height.toDouble()).toInt();
-      final int cropW  = right - left;
-      final int cropH  = bottom - top;
+      final int left =
+          lsBox.left.clamp(0.0, (tempImage.width - 1).toDouble()).toInt();
+      final int top =
+          lsBox.top.clamp(0.0, (tempImage.height - 1).toDouble()).toInt();
+      final int right =
+          lsBox.right
+              .clamp((left + 1).toDouble(), tempImage.width.toDouble())
+              .toInt();
+      final int bottom =
+          lsBox.bottom
+              .clamp((top + 1).toDouble(), tempImage.height.toDouble())
+              .toInt();
+      final int cropW = right - left;
+      final int cropH = bottom - top;
 
       if (cropW <= 0 || cropH <= 0) {
-        print('[REG] Invalid crop: ${cropW}x$cropH');
-        isBusy = false; return;
+        _log.w('[REG] Invalid crop: ${cropW}x$cropH');
+        isBusy = false;
+        return;
+      }
+
+      if (cropW < _minFaceSizePx || cropH < _minFaceSizePx) {
+        _log.d('[REG] Crop too small: ${cropW}x$cropH - skipping');
+        isBusy = false;
+        return;
       }
 
       // Step 3: Crop SMALL region from landscape (cheap, ~200x200px vs 720x480)
       final img.Image croppedLandscape = img.copyCrop(
-        tempImage, x: left, y: top, width: cropW, height: cropH,
+        tempImage,
+        x: left,
+        y: top,
+        width: cropW,
+        height: cropH,
       );
 
       // Step 4: Rotate only the small crop to portrait orientation
@@ -374,24 +434,28 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         angle: camDirec == CameraLensDirection.front ? 270 : 90,
       );
 
-      print('[REG] portrait_bbox=$faceBox  cropSize=${cropped.width}x${cropped.height}');
+      _log.d(
+        '[REG] portrait_bbox=$faceBox cropSize=${cropped.width}x${cropped.height}',
+      );
 
       if (_isFaceSharp(cropped)) {
         _validFrameCount++;
-        print('[REG] Sharp frame! validFrameCount=$_validFrameCount/$_requiredValidFrames');
+        _log.d(
+          '[REG] Sharp frame. validFrameCount=$_validFrameCount/$_requiredValidFrames',
+        );
         if (_validFrameCount >= _requiredValidFrames && !getEmb) {
           getEmb = true;
           _validFrameCount = 0;
           performFaceRecognition(face, cropped);
         }
       } else {
-        print('[REG] Face not sharp, skipping');
+        _log.d('[REG] Face not sharp, skipping');
         _validFrameCount = 0;
       }
 
       isBusy = false;
     } catch (e, st) {
-      print('Face detection error: $e\n$st');
+      _log.e('Face detection error', e, st);
       isBusy = false;
     }
   }
@@ -409,33 +473,33 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   Rect _portraitBoxToLandscape(Rect p, int lsW, int lsH) {
     if (camDirec == CameraLensDirection.front) {
       // 270° CCW: landscape_sx = lsW-1-py,  landscape_sy = px
-      final left   = (lsW - 1 - p.bottom).clamp(0.0, (lsW - 1).toDouble());
-      final top    = p.left.clamp(0.0, (lsH - 1).toDouble());
-      final right  = (lsW - 1 - p.top).clamp(left + 1, lsW.toDouble());
+      final left = (lsW - 1 - p.bottom).clamp(0.0, (lsW - 1).toDouble());
+      final top = p.left.clamp(0.0, (lsH - 1).toDouble());
+      final right = (lsW - 1 - p.top).clamp(left + 1, lsW.toDouble());
       final bottom = p.right.clamp(top + 1, lsH.toDouble());
       return Rect.fromLTRB(left, top, right, bottom);
     } else {
       // 90° CW: landscape_sx = py, landscape_sy = lsH-1-px
-      final left   = p.top.clamp(0.0, (lsW - 1).toDouble());
-      final top    = (lsH - 1 - p.right).clamp(0.0, (lsH - 1).toDouble());
-      final right  = p.bottom.clamp(left + 1, lsW.toDouble());
+      final left = p.top.clamp(0.0, (lsW - 1).toDouble());
+      final top = (lsH - 1 - p.right).clamp(0.0, (lsH - 1).toDouble());
+      final right = p.bottom.clamp(left + 1, lsW.toDouble());
       final bottom = (lsH - 1 - p.left).clamp(top + 1, lsH.toDouble());
       return Rect.fromLTRB(left, top, right, bottom);
     }
   }
 
-
   void performFaceRecognition(Face face, img.Image cropped) async {
     // Check recognizer.isReady directly — do NOT rely on _recognizerReady cache
     // because initState() calls _initRecognizer() async without await, creating
     // a race condition where setState may not have fired yet.
-    print('[REG] performFaceRecognition: isReady=${recognizer.isReady}, _recognizerReady=$_recognizerReady');
+    _log.d(
+      '[REG] performFaceRecognition: isReady=${recognizer.isReady}, _recognizerReady=$_recognizerReady',
+    );
     if (!recognizer.isReady) {
-      print('[REG] Recognizer not ready — waiting and retrying once...');
-      // Wait briefly and try once more in case model is mid-load
-      await Future.delayed(const Duration(milliseconds: 300));
+      _log.w('[REG] Recognizer not ready - awaiting initialization');
+      await _recognizerInit;
       if (!recognizer.isReady) {
-        print('[REG] Recognizer still not ready after wait. Aborting.');
+        _log.w('[REG] Recognizer still not ready after init. Aborting.');
         isBusy = false;
         getEmb = false;
         return;
@@ -458,7 +522,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
       // NaN guard: jika model menghasilkan NaN, coba frame berikutnya
       if (recognition.distance == -2) {
-        print('[REG] ⚠️ NaN embedding untuk step $_currentStep — retrying next frame');
+        _log.w(
+          '[REG] NaN embedding for step $_currentStep - retrying next frame',
+        );
         if (mounted) {
           setState(() {
             isBusy = false;
@@ -474,12 +540,14 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       // Guard: if embedding is all zeros, model failed silently
       final bool embValid = recognition.embeddings.any((v) => v != 0.0);
       if (!embValid) {
-        print('[REG] WARNING: embedding is all zeros — model inference may have failed');
+        _log.w(
+          '[REG] Embedding is all zeros - model inference may have failed',
+        );
       }
 
       embeddings.add(recognition.embeddings);
-      print(
-        '[REG] ✅ Captured embedding ${embeddings.length}/${faceAngles.length} for step $_currentStep (${faceAngles[_currentStep]}) | emb[0]=${recognition.embeddings[0].toStringAsFixed(4)}',
+      _log.d(
+        '[REG] Captured embedding ${embeddings.length}/${faceAngles.length} for step $_currentStep (${faceAngles[_currentStep]}) | emb[0]=${recognition.embeddings[0].toStringAsFixed(4)}',
       );
 
       if (!mounted) {
@@ -500,7 +568,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       });
     } catch (e, st) {
       // CRITICAL: always reset getEmb so subsequent frames are not permanently blocked
-      print('[REG] performFaceRecognition ERROR: $e\n$st');
+      _log.e('[REG] performFaceRecognition error', e, st);
       if (mounted) {
         setState(() {
           isBusy = false;
@@ -582,8 +650,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                 onPressed: () async {
                   // Buat salinan data sebelum state direset
                   final String name = userName;
-                  final List<List<double>> embs =
-                      List<List<double>>.from(embeddings);
+                  final List<List<double>> embs = List<List<double>>.from(
+                    embeddings,
+                  );
                   final Uint8List imgBytes = Uint8List.fromList(
                     img.encodeBmp(croppedFace),
                   );
@@ -612,7 +681,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                       );
                     }
                   } catch (e) {
-                    print('[REG] registerFaceInDB FAILED: $e');
+                    _log.e('[REG] registerFaceInDB failed', e);
                     if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
@@ -843,7 +912,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       setState(() {});
       await initializeCamera();
     } catch (e) {
-      print('Toggle camera error: $e');
+      _log.e('Toggle camera error', e);
     }
   }
 
@@ -1046,7 +1115,8 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
               ),
               const SizedBox(height: 8),
               DropdownButtonFormField<String>(
-                value: _selectedUnitType,
+                key: ValueKey(_selectedUnitType),
+                initialValue: _selectedUnitType,
                 decoration: InputDecoration(
                   hintText: 'Select unit type',
                   hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
@@ -1389,7 +1459,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
           right: 0,
           child: Card(
             margin: const EdgeInsets.symmetric(horizontal: 20),
-            color: Colors.white.withOpacity(0.9),
+            color: Colors.white.withValues(alpha: 0.9),
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -1563,11 +1633,6 @@ class FaceDetectorPainter extends CustomPainter {
           ..style = PaintingStyle.stroke
           ..strokeWidth = 2.5
           ..color = Colors.deepPurple.shade300;
-
-    final Paint labelBgPaint =
-        Paint()
-          ..style = PaintingStyle.fill
-          ..color = Colors.deepPurple.shade300.withAlpha(150);
 
     for (final face in faces) {
       final double left =

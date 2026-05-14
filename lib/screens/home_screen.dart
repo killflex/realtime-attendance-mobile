@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 
-import 'RecognitionScreen.dart';
-import 'RegisteredFacesScreen.dart';
-import 'RegistrationScreen.dart';
+import 'recognition_screen.dart';
+import 'registered_faces_screen.dart';
+import 'registration_screen.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -67,7 +67,9 @@ class HomeScreen extends StatelessWidget {
                         ),
                       ),
                       title: const Text("Daftar Wajah Baru"),
-                      subtitle: const Text("Ambil dan simpan data wajah pengguna baru"),
+                      subtitle: const Text(
+                        "Ambil dan simpan data wajah pengguna baru",
+                      ),
                       trailing: const Icon(Icons.arrow_forward_ios_rounded),
                       onTap:
                           () => Navigator.push(
@@ -113,7 +115,9 @@ class HomeScreen extends StatelessWidget {
                         ),
                       ),
                       title: const Text("Wajah Terdaftar"),
-                      subtitle: const Text("Lihat semua data wajah yang tersimpan"),
+                      subtitle: const Text(
+                        "Lihat semua data wajah yang tersimpan",
+                      ),
                       trailing: const Icon(Icons.arrow_forward_ios_rounded),
                       onTap:
                           () => Navigator.push(
