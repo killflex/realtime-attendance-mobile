@@ -27,6 +27,7 @@ Future<void> setupLocator() async {
       minFaceSize: 0.15,
       enableTracking: true,
     );
+
     return FaceDetector(options: options);
   });
 }

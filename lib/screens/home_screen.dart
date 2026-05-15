@@ -21,11 +21,11 @@ class HomeScreen extends StatelessWidget {
           children: [
             const SizedBox(height: 30),
 
-            // Header Text with Material 3
+            // Header Text
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
+              padding: const EdgeInsets.fromLTRB(20, 24, 20, 0),
               child: Text(
-                "Sistem Absensi Pengenalan Wajah",
+                "Sistem Pengenalan Wajah MobileFaceNet",
                 style: theme.textTheme.headlineSmall?.copyWith(
                   fontWeight: FontWeight.bold,
                   color: colorScheme.onSurface,
@@ -34,7 +34,7 @@ class HomeScreen extends StatelessWidget {
               ),
             ),
 
-            const SizedBox(height: 40),
+            const SizedBox(height: 60),
 
             // Logo
             Hero(
@@ -57,20 +57,16 @@ class HomeScreen extends StatelessWidget {
                   vertical: 10,
                 ),
                 children: [
-                  Card.filled(
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: colorScheme.primaryContainer,
-                        child: Icon(
-                          Icons.person_add_rounded,
-                          color: colorScheme.onPrimaryContainer,
-                        ),
+                  Card.outlined(
+                    elevation: 0,
+                    color: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      side: BorderSide(
+                        color: Theme.of(context).colorScheme.outline,
                       ),
-                      title: const Text("Daftar Wajah Baru"),
-                      subtitle: const Text(
-                        "Ambil dan simpan data wajah pengguna baru",
-                      ),
-                      trailing: const Icon(Icons.arrow_forward_ios_rounded),
+                      borderRadius: const BorderRadius.all(Radius.circular(12)),
+                    ),
+                    child: InkWell(
                       onTap:
                           () => Navigator.push(
                             context,
@@ -78,23 +74,33 @@ class HomeScreen extends StatelessWidget {
                               builder: (_) => const RegistrationScreen(),
                             ),
                           ),
+                      borderRadius: const BorderRadius.all(Radius.circular(12)),
+                      child: ListTile(
+                        leading: const CircleAvatar(
+                          backgroundColor: Colors.transparent,
+                          child: Icon(Icons.person_add_rounded),
+                        ),
+                        title: const Text("Daftar Wajah Baru"),
+                        subtitle: const Text(
+                          "Ambil dan simpan data wajah pengguna baru",
+                        ),
+                        trailing: const Icon(Icons.arrow_forward_ios_rounded),
+                      ),
                     ),
                   ),
+
                   const SizedBox(height: 12),
-                  Card.filled(
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: colorScheme.secondaryContainer,
-                        child: Icon(
-                          Icons.filter_center_focus_rounded,
-                          color: colorScheme.onSecondaryContainer,
-                        ),
+
+                  Card.outlined(
+                    elevation: 0,
+                    color: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      side: BorderSide(
+                        color: Theme.of(context).colorScheme.outline,
                       ),
-                      title: const Text("Deteksi Wajah"),
-                      subtitle: const Text(
-                        "Identifikasi wajah terdaftar secara real-time",
-                      ),
-                      trailing: const Icon(Icons.arrow_forward_ios_rounded),
+                      borderRadius: const BorderRadius.all(Radius.circular(12)),
+                    ),
+                    child: InkWell(
                       onTap:
                           () => Navigator.push(
                             context,
@@ -102,23 +108,33 @@ class HomeScreen extends StatelessWidget {
                               builder: (_) => const RecognitionScreen(),
                             ),
                           ),
+                      borderRadius: const BorderRadius.all(Radius.circular(12)),
+                      child: ListTile(
+                        leading: const CircleAvatar(
+                          backgroundColor: Colors.transparent,
+                          child: Icon(Icons.filter_center_focus_rounded),
+                        ),
+                        title: const Text("Deteksi Wajah"),
+                        subtitle: const Text(
+                          "Identifikasi wajah terdaftar secara real-time",
+                        ),
+                        trailing: const Icon(Icons.arrow_forward_ios_rounded),
+                      ),
                     ),
                   ),
+
                   const SizedBox(height: 12),
-                  Card.filled(
-                    child: ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: colorScheme.tertiaryContainer,
-                        child: Icon(
-                          Icons.storage_rounded,
-                          color: colorScheme.onTertiaryContainer,
-                        ),
+
+                  Card.outlined(
+                    elevation: 0,
+                    color: Colors.white,
+                    shape: RoundedRectangleBorder(
+                      side: BorderSide(
+                        color: Theme.of(context).colorScheme.outline,
                       ),
-                      title: const Text("Wajah Terdaftar"),
-                      subtitle: const Text(
-                        "Lihat semua data wajah yang tersimpan",
-                      ),
-                      trailing: const Icon(Icons.arrow_forward_ios_rounded),
+                      borderRadius: const BorderRadius.all(Radius.circular(12)),
+                    ),
+                    child: InkWell(
                       onTap:
                           () => Navigator.push(
                             context,
@@ -126,28 +142,31 @@ class HomeScreen extends StatelessWidget {
                               builder: (_) => const RegisteredFacesScreen(),
                             ),
                           ),
+                      borderRadius: const BorderRadius.all(Radius.circular(12)),
+                      child: ListTile(
+                        leading: const CircleAvatar(
+                          backgroundColor: Colors.transparent,
+                          child: Icon(Icons.storage_rounded),
+                        ),
+                        title: const Text("Wajah Terdaftar"),
+                        subtitle: const Text(
+                          "Lihat semua data wajah yang tersimpan",
+                        ),
+                        trailing: const Icon(Icons.arrow_forward_ios_rounded),
+                      ),
                     ),
                   ),
                 ],
               ),
             ),
 
-            // Footer with Material 3
-            Divider(color: colorScheme.outlineVariant),
+            // Footer
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 30),
               child: Column(
                 children: [
                   Text(
-                    '© 2026 Sistem Absensi Pengenalan Wajah',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Made with ❤️ by Ferry Hasan',
+                    'Copyright © 2026 Ferry Hasan',
                     style: theme.textTheme.bodySmall?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                     ),

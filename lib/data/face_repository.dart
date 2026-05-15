@@ -17,13 +17,16 @@ class FaceRepository {
   Future<List<FaceRecord>> getAllFaces() async {
     await _dbHelper.init();
     final rows = await _dbHelper.queryAllRows();
+
     return rows.map(FaceRecord.fromMap).toList();
   }
 
   Future<int> insertFace(FaceRecord record) async {
     await _dbHelper.init();
     final id = await _dbHelper.insert(record.toMap());
+
     _log.i('Inserted face record: name=${record.name}, id=$id');
+
     return id;
   }
 

@@ -17,23 +17,27 @@ class Util {
   }
 
   static img.Image convertNV21(CameraImage image) {
+    Uint8List yuv420sp = image.planes[0].bytes;
+
     final width = image.width.toInt();
     final height = image.height.toInt();
-
-    Uint8List yuv420sp = image.planes[0].bytes;
 
     final outImg = img.Image(height: height, width: width);
     final int frameSize = width * height;
 
     for (int j = 0, yp = 0; j < height; j++) {
       int uvp = frameSize + (j >> 1) * width, u = 0, v = 0;
+
       for (int i = 0; i < width; i++, yp++) {
         int y = (0xff & yuv420sp[yp]) - 16;
+
         if (y < 0) y = 0;
+
         if ((i & 1) == 0) {
           v = (0xff & yuv420sp[uvp++]) - 128;
           u = (0xff & yuv420sp[uvp++]) - 128;
         }
+
         int y1192 = 1192 * y;
         int r = (y1192 + 1634 * v);
         int g = (y1192 - 833 * v - 400 * u);
@@ -57,8 +61,6 @@ class Util {
           b = 262143;
         }
 
-        // I don't know how these r, g, b values are defined, I'm just copying what you had bellow and
-        // getting their 8-bit values.
         outImg.setPixelRgb(
           i,
           j,
@@ -68,10 +70,11 @@ class Util {
         );
       }
     }
+
     return outImg;
   }
 
-  // TODO method to convert CameraImage to Image
+  // Convert CameraImage to Image
   img.Image convertYUV420ToImage(CameraImage cameraImage) {
     final width = cameraImage.width;
     final height = cameraImage.height;
@@ -95,6 +98,7 @@ class Util {
         image.data!.setPixelR(w, h, yuv2rgb(y, u, v)); //= yuv2rgb(y, u, v);
       }
     }
+
     return image;
   }
 

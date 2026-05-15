@@ -115,36 +115,6 @@ class ErrorScreen extends StatelessWidget {
     );
   }
 
-  // Factory method untuk error koneksi
-  factory ErrorScreen.networkError({
-    VoidCallback? onRetry,
-    VoidCallback? onBack,
-  }) {
-    return ErrorScreen(
-      title: 'Koneksi Bermasalah',
-      message: 'Tidak dapat terhubung ke server.',
-      details: 'Periksa koneksi internet Anda dan coba lagi.',
-      icon: Icons.wifi_off_outlined,
-      iconColor: Colors.blueGrey,
-      onRetry: onRetry,
-      onBack: onBack,
-      actions: [
-        if (onBack != null)
-          OutlinedButton.icon(
-            onPressed: onBack,
-            icon: const Icon(Icons.arrow_back),
-            label: const Text('Kembali'),
-          ),
-        if (onRetry != null)
-          ElevatedButton.icon(
-            onPressed: onRetry,
-            icon: const Icon(Icons.refresh),
-            label: const Text('Coba Lagi'),
-          ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -310,4 +280,3 @@ class ErrorApp extends StatelessWidget {
     );
   }
 }
-

@@ -574,6 +574,9 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
         left: 16,
         child: SafeArea(
           child: FilledButton.tonalIcon(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.white.withValues(alpha: 0.9),
+            ),
             onPressed: () => Navigator.pop(context),
             icon: const Icon(Icons.arrow_back_rounded),
             label: const Text('Kembali'),
@@ -588,15 +591,14 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
         left: 0,
         right: 0,
         child: Center(
-          child: FilledButton.icon(
+          child: FilledButton(
             style: FilledButton.styleFrom(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
               backgroundColor: Colors.white.withValues(alpha: 0.9),
               foregroundColor: Colors.black,
             ),
             onPressed: _toggleCameraDirection,
-            icon: const Icon(Icons.flip_camera_android_rounded, size: 28),
-            label: const Text('Balik Kamera', style: TextStyle(fontSize: 16)),
+            child: const Icon(Icons.flip_camera_android_rounded, size: 28),
           ),
         ),
       ),

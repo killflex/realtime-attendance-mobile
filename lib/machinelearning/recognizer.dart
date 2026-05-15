@@ -28,8 +28,8 @@ class Recognizer {
   String get modelName => 'assets/mobilefacenet_baseline_f32.tflite';
 
   bool _isLoaded = false;
-  Future<void>? _initFuture;
   bool _isRunning = false;
+  Future<void>? _initFuture;
 
   bool get isReady => _isLoaded && _interpreter != null;
 
@@ -44,6 +44,7 @@ class Recognizer {
 
   Future<void> init() async {
     _initFuture ??= _initInternal();
+
     return _initFuture!;
   }
 
@@ -86,6 +87,7 @@ class Recognizer {
     int maxSizeInKB = 500,
   }) async {
     img.Image? image = img.decodeImage(imageData);
+
     if (image == null) throw Exception('Image decoding failed');
 
     img.Image resized = img.copyResize(image, width: 300);

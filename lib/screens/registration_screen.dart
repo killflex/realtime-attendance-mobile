@@ -7,7 +7,6 @@ import 'package:image/image.dart' as img;
 import 'package:realtime_attendance_mobile/di/service_locator.dart';
 import 'package:realtime_attendance_mobile/logging/app_logger.dart';
 import 'package:realtime_attendance_mobile/machinelearning/recognizer.dart';
-import 'package:realtime_attendance_mobile/screens/home_screen.dart';
 import 'package:realtime_attendance_mobile/util.dart';
 
 import '../machinelearning/recognition.dart';
@@ -37,10 +36,10 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   List<Face>? _scanResults;
   CameraImage? frame;
 
-  //TODO declare face detector
+  // Declare face detector
   late FaceDetector faceDetector;
 
-  //TODO declare face recognizer
+  // Declare face recognizer
   late Recognizer recognizer;
   bool _recognizerReady = false;
   Future<void>? _recognizerInit;
@@ -78,10 +77,10 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
   List<String> positionInstructions = [
     "Lihat lurus ke kamera",
-    "Tengok sedikit ke kanan",
-    "Tengok sedikit ke kiri",
-    "Lihat ke bawah",
-    "Lihat ke atas",
+    "Lihat sedikit ke kanan",
+    "Lihat sedikit ke kiri",
+    "Lihat sedikit ke bawah",
+    "Lihat sedikit ke atas",
   ];
 
   bool dialogShown = false;
@@ -94,10 +93,10 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     // Initialize camera description safely
     _initializeCameraDescription();
 
-    //TODO initialize face detector
+    // Initialize face detector
     faceDetector = getIt<FaceDetector>();
 
-    //TODO initialize face recognizer
+    // Initialize face recognizer
     _recognizerInit = _initRecognizer();
 
     // Start camera immediately (no form step)
@@ -557,7 +556,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                     'Berhasil menangkap ${embeddings.length} sudut wajah',
                     style: Theme.of(context).textTheme.bodyMedium,
                   ),
+
                   const SizedBox(height: 16),
+
                   ClipRRect(
                     borderRadius: BorderRadius.circular(12),
                     child: Image.memory(
@@ -662,7 +663,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     );
   }
 
-  // //TODO convert CameraImage to InputImage
+  // Convert CameraImage to InputImage
   final _orientations = {
     DeviceOrientation.portraitUp: 0,
     DeviceOrientation.landscapeLeft: 90,
@@ -713,65 +714,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     );
   }
 
-  void startFaceRegistration() {
-    embeddings.clear();
-    registrationStep = 0;
-    promptForNextPosition();
-  }
-
-  void promptForNextPosition() {
-    if (registrationStep < positionInstructions.length) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(positionInstructions[registrationStep]),
-          duration: const Duration(seconds: 2),
-        ),
-      );
-      registrationStep++;
-    } else {
-      // Registration complete
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Face registration complete!")),
-      );
-    }
-  }
-
-  void captureEmbedding(Recognition recognition) {
-    embeddings.add(recognition.embeddings);
-    registrationStep++;
-
-    if (registrationStep < positionInstructions.length) {
-      promptForNextPosition();
-    } else {
-      // All embeddings captured, proceed to save
-      completeRegistration();
-    }
-  }
-
-  void completeRegistration() {
-    recognizer.registerFaceInDB(
-      textEditingController.text,
-      embeddings,
-      Uint8List.fromList(img.encodeBmp(frontFace!)),
-    );
-
-    textEditingController.clear();
-    dialogShown = false;
-    Navigator.pop(context); // Close dialog
-
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text("Face Registered Successfully with Multiple Angles!"),
-      ),
-    );
-
-    Navigator.pushReplacement(
-      context,
-      MaterialPageRoute(builder: (context) => const HomeScreen()),
-    );
-  }
-
-  // TODO Show rectangles around detected faces
+  // Show rectangles around detected faces
   Widget buildResult() {
     if (_scanResults == null ||
         controller == null ||
@@ -811,7 +754,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     return RepaintBoundary(child: CustomPaint(painter: painter));
   }
 
-  //TODO toggle camera direction
+  // Toggle camera direction
   Future<void> _toggleCameraDirection() async {
     if (cameras.isEmpty || cameras.length < 2) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -854,32 +797,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.grey[50],
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Color(0xFF09090b)),
-          onPressed: () {
-            Navigator.pop(context);
-          },
-        ),
-        title: const Text(
-          'Registration - Face Capture',
-          style: TextStyle(
-            color: Color(0xFF09090b),
-            fontSize: 18,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(1),
-          child: Container(color: const Color(0xFFE5E7EB), height: 1),
-        ),
-      ),
-      body: _buildStep2(),
-    );
+    return Scaffold(backgroundColor: Colors.grey[50], body: _buildStep2());
   }
 
   // Step 2: Face Capture
@@ -905,7 +823,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         ),
       );
 
-      //TODO View for displaying rectangles around detected faces
+      // View for displaying rectangles around detected faces
       stackChildren.add(
         Positioned(
           top: 0.0,
@@ -920,6 +838,24 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         const Center(child: CircularProgressIndicator(color: Colors.white)),
       );
     }
+
+    // Back button
+    stackChildren.add(
+      Positioned(
+        top: 16,
+        left: 16,
+        child: SafeArea(
+          child: FilledButton.tonalIcon(
+            style: FilledButton.styleFrom(
+              backgroundColor: Colors.white.withValues(alpha: 0.9),
+            ),
+            onPressed: () => Navigator.pop(context),
+            icon: const Icon(Icons.arrow_back_rounded),
+            label: const Text('Kembali'),
+          ),
+        ),
+      ),
+    );
 
     // Caution Dialog on first entry
     if (_showCautionDialog) {
@@ -936,7 +872,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
           left: 0,
           right: 0,
           child: Card(
-            margin: const EdgeInsets.symmetric(horizontal: 20),
+            margin: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
             color: Colors.white.withValues(alpha: 0.9),
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -986,7 +922,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       );
     }
 
-    //TODO View for displaying the bar to switch camera direction
+    // View for displaying the bar to switch camera direction
     stackChildren.add(
       Positioned(
         bottom: 40,
@@ -995,19 +931,26 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            FloatingActionButton(
-              heroTag: 'flip',
-              backgroundColor: Colors.white,
-              onPressed: _toggleCameraDirection,
-              child: const Icon(
-                Icons.flip_camera_android_rounded,
-                color: Colors.black,
+            FilledButton(
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 16,
+                ),
+                backgroundColor: Colors.white.withValues(alpha: 0.9),
+                foregroundColor: Colors.black,
               ),
+              onPressed: _toggleCameraDirection,
+              child: const Icon(Icons.flip_camera_android_rounded, size: 28),
             ),
+
             const SizedBox(width: 16),
-            FloatingActionButton(
-              heroTag: 'reset',
-              backgroundColor: Colors.white,
+
+            FilledButton(
+              style: FilledButton.styleFrom(
+                backgroundColor: Colors.white.withValues(alpha: 0.9),
+                foregroundColor: Colors.black,
+              ),
               onPressed: () {
                 setState(() {
                   _currentStep = 0;
@@ -1016,7 +959,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                   dialogShown = false;
                 });
               },
-              child: const Icon(Icons.refresh_rounded, color: Colors.black),
+              child: const Icon(Icons.refresh_rounded, size: 28),
             ),
           ],
         ),
@@ -1043,37 +986,45 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       barrierDismissible: false,
       builder:
           (context) => AlertDialog(
+            backgroundColor: Colors.white.withValues(alpha: 0.9),
+            iconColor: Colors.black,
             icon: const Icon(Icons.info_outline, size: 48),
-            title: const Text('Capture Instructions'),
+            title: const Text('Instruksi'),
             content: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
                 ListTile(
                   leading: const Icon(Icons.visibility_off),
-                  title: const Text('Remove glasses'),
+                  title: const Text('Lepas Aksesoris'),
                   dense: true,
                 ),
                 ListTile(
                   leading: const Icon(Icons.wb_sunny_outlined),
-                  title: const Text('Good lighting'),
+                  title: const Text('Pencahayaan Stabil'),
                   dense: true,
                 ),
                 ListTile(
                   leading: const Icon(Icons.face),
-                  title: const Text('Follow instructions'),
+                  title: const Text('Ikuti Instruksi'),
                   dense: true,
                 ),
                 ListTile(
                   leading: const Icon(Icons.camera_alt),
-                  title: const Text('5 different angles'),
+                  title: const Text('5 Sudut Pandang'),
                   dense: true,
                 ),
               ],
             ),
             actions: [
-              FilledButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('Start Capture'),
+              Center(
+                child: OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    backgroundColor: Colors.black,
+                    foregroundColor: Colors.white,
+                  ),
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Mulai Foto'),
+                ),
               ),
             ],
           ),

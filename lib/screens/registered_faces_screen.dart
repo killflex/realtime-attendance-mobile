@@ -67,7 +67,7 @@ class _RegisteredFacesScreenState extends State<RegisteredFacesScreen> {
     final colorScheme = theme.colorScheme;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Registered Faces')),
+      appBar: AppBar(title: const Text('Daftar Wajah Pengguna')),
       body:
           faces.isEmpty
               ? Center(

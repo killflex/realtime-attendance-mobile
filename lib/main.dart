@@ -15,6 +15,7 @@ Future<void> main() async {
 
   try {
     cameras = await availableCameras();
+
     if (cameras.isEmpty) {
       log.w('No cameras available on this device');
 
@@ -50,7 +51,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Realtime Attendance',
+      title: 'QuantFace Mobile',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF6750A4),
