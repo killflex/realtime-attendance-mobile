@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -44,7 +43,13 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
     milliseconds: 300,
   ); // Process every 300ms
   int _skipFrameCount = 0;
-  static const _skipFrames = 2; // Skip 2 frames between processing
+  static const _skipFrames = 0; // Skip 2 frames between processing
+  static const int _minFaceSizePx = 80;
+  static const Duration _stableDuration = Duration(seconds: 1);
+  static const double _liveThresholdOffset = 0.015;
+
+  String? _lastName;
+  DateTime? _stableSince;
 
   @override
   void initState() {
@@ -113,11 +118,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       controller = CameraController(
         description,
         ResolutionPreset.medium,
-        imageFormatGroup:
-            Platform.isAndroid
-                ? ImageFormatGroup
-                    .nv21 // for Android
-                : ImageFormatGroup.yuv420, // for iOS
+        imageFormatGroup: ImageFormatGroup.nv21,
         enableAudio: false,
       );
 
@@ -210,26 +211,33 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
         return;
       }
 
-      recognitions.clear();
-
       if (frame == null) {
         if (mounted) setState(() => isBusy = false);
         return;
       }
 
-      // Step 1: Convert NV21 → landscape (raw, no full rotation)
-      img.Image? originalImage;
-      if (Platform.isIOS) {
-        originalImage = await compute(Util.convertBGRA8888ToImage, frame!);
-      } else {
-        originalImage = await compute(Util.convertNV21, frame!);
+      if (faces.isEmpty) {
+        if (mounted) setState(() => isBusy = false);
+        return;
       }
+
+      // Step 1: Convert NV21 → landscape (raw, no full rotation)
+      img.Image? originalImage = await compute(Util.convertNV21, frame!);
       if (originalImage == null) {
         if (mounted) setState(() => isBusy = false);
         return;
       }
 
-      for (Face face in faces.take(3)) {
+      // Use the largest face for recognition to reduce false positives.
+      Face face = faces.reduce((a, b) {
+        final double areaA = a.boundingBox.width * a.boundingBox.height;
+        final double areaB = b.boundingBox.width * b.boundingBox.height;
+        return areaA >= areaB ? a : b;
+      });
+
+      final List<Recognition> currentRecognitions = [];
+
+      try {
         // Step 2: Transform portrait bbox → landscape coordinates
         final Rect lsBox = _portraitBoxToLandscape(
           face.boundingBox,
@@ -252,46 +260,84 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
         final int cropW = right - left;
         final int cropH = bottom - top;
 
-        if (cropW <= 0 || cropH <= 0) continue;
-
-        try {
-          // Step 3: Crop small region from landscape
-          final img.Image croppedLandscape = img.copyCrop(
-            originalImage,
-            x: left,
-            y: top,
-            width: cropW,
-            height: cropH,
-          );
-
-          // Step 4: Rotate only the small crop
-          final img.Image croppedFace = img.copyRotate(
-            croppedLandscape,
-            angle: camDirec == CameraLensDirection.front ? 270 : 90,
-          );
-
-          _log.d(
-            '[REC] bbox=${face.boundingBox} cropSize=${croppedFace.width}x${croppedFace.height}',
-          );
-
-          Recognition recognition = recognizer.recognize(
-            croppedFace,
-            face.boundingBox,
-          );
-          _log.d(
-            '[REC] name=${recognition.name} distance=${recognition.distance.toStringAsFixed(3)}',
-          );
-
-          if (recognition.distance >= 0) recognitions.add(recognition);
-        } catch (e) {
-          _log.e('[REC] Error processing face', e);
+        if (cropW <= 0 || cropH <= 0) {
+          if (mounted) setState(() => isBusy = false);
+          return;
         }
+
+        if (cropW < _minFaceSizePx || cropH < _minFaceSizePx) {
+          _log.d('[REC] Face too small: ${cropW}x$cropH - skipping');
+          if (mounted) setState(() => isBusy = false);
+          return;
+        }
+
+        // Step 3: Crop small region from landscape
+        final img.Image croppedLandscape = img.copyCrop(
+          originalImage,
+          x: left,
+          y: top,
+          width: cropW,
+          height: cropH,
+        );
+
+        // Step 4: Rotate only the small crop
+        final img.Image croppedFace = img.copyRotate(
+          croppedLandscape,
+          angle: camDirec == CameraLensDirection.front ? 270 : 90,
+        );
+
+        _log.d(
+          '[REC] bbox=${face.boundingBox} cropSize=${croppedFace.width}x${croppedFace.height}',
+        );
+
+        Recognition recognition = recognizer.recognizeCropped(
+          croppedFace,
+          face.boundingBox,
+        );
+        _log.d(
+          '[REC] name=${recognition.name} score=${recognition.score.toStringAsFixed(3)}',
+        );
+
+        if (!recognition.name.startsWith('__')) {
+          final double liveThreshold =
+              recognizer.cosineThreshold + _liveThresholdOffset;
+          final bool aboveThreshold = recognition.score >= liveThreshold;
+          final String candidateName =
+              aboveThreshold ? recognition.name : 'Unknown';
+
+          final DateTime now = DateTime.now();
+          if (candidateName == 'Unknown') {
+            _lastName = null;
+            _stableSince = null;
+          } else if (_lastName == candidateName) {
+            _stableSince ??= now;
+          } else {
+            _lastName = candidateName;
+            _stableSince = now;
+          }
+
+          final bool isStable =
+              _stableSince != null &&
+              now.difference(_stableSince!) >= _stableDuration;
+          final String displayName = isStable ? candidateName : 'Unknown';
+
+          currentRecognitions.add(
+            Recognition(
+              displayName,
+              recognition.location,
+              recognition.embeddings,
+              recognition.score,
+            ),
+          );
+        }
+      } catch (e) {
+        _log.e('[REC] Error processing face', e);
       }
 
       if (mounted) {
         setState(() {
           isBusy = false;
-          _scanResults = List.from(recognitions);
+          _scanResults = List.from(currentRecognitions);
         });
       }
     } catch (e) {
@@ -336,28 +382,22 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
     final sensorOrientation = camera.sensorOrientation;
 
     InputImageRotation? rotation;
-    if (Platform.isIOS) {
-      rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
-    } else if (Platform.isAndroid) {
-      var rotationCompensation =
-          _orientations[controller!.value.deviceOrientation];
-      if (rotationCompensation == null) return null;
-      if (camera.lensDirection == CameraLensDirection.front) {
-        // front-facing
-        rotationCompensation = (sensorOrientation + rotationCompensation) % 360;
-      } else {
-        // back-facing
-        rotationCompensation =
-            (sensorOrientation - rotationCompensation + 360) % 360;
-      }
-      rotation = InputImageRotationValue.fromRawValue(rotationCompensation);
+    var rotationCompensation =
+        _orientations[controller!.value.deviceOrientation];
+    if (rotationCompensation == null) return null;
+    if (camera.lensDirection == CameraLensDirection.front) {
+      // front-facing
+      rotationCompensation = (sensorOrientation + rotationCompensation) % 360;
+    } else {
+      // back-facing
+      rotationCompensation =
+          (sensorOrientation - rotationCompensation + 360) % 360;
     }
+    rotation = InputImageRotationValue.fromRawValue(rotationCompensation);
     if (rotation == null) return null;
 
     final format = InputImageFormatValue.fromRawValue(frame!.format.raw);
-    if (format == null ||
-        (Platform.isAndroid && format != InputImageFormat.nv21) ||
-        (Platform.isIOS && format != InputImageFormat.bgra8888)) {
+    if (format == null || format != InputImageFormat.nv21) {
       return null;
     }
 
@@ -632,7 +672,7 @@ class FaceDetectorPainter extends CustomPainter {
       // Draw name label
       final String label =
           face.name.isNotEmpty
-              ? '${face.name} (${face.distance.toStringAsFixed(2)})'
+              ? '${face.name} (score ${face.score.toStringAsFixed(2)})'
               : 'Unknown';
 
       final textSpan = TextSpan(

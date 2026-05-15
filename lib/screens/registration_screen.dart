@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -24,26 +22,6 @@ class RegistrationScreen extends StatefulWidget {
 
 class _RegistrationScreenState extends State<RegistrationScreen> {
   final AppLogger _log = AppLogger();
-  // Page Controller for two-step process
-  final PageController _pageController = PageController();
-  int _currentPage = 0;
-
-  // Form Controllers and State - Step 1
-  final _formKey = GlobalKey<FormState>();
-  final _namaLengkapController = TextEditingController();
-  String? _selectedStatus;
-  String? _selectedUnitType;
-  String? _selectedUnit;
-  final _identityController = TextEditingController();
-  final _phoneController = TextEditingController();
-  final _emailController = TextEditingController();
-
-  // Unit Kerja Data
-  final Map<String, List<String>> _unitKerjaData = {
-    'UPA': ['Bahasa', 'Kewirausahaan', 'Perpustakaan', 'TIK'],
-    'Lembaga': ['LPPM', 'LPMPP'],
-    'Fakultas': ['Ilmu Komputer', 'Ekonomi dan Bisnis', 'Teknik', 'Hukum'],
-  };
 
   bool _showCautionDialog = true;
 
@@ -122,7 +100,8 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     //TODO initialize face recognizer
     _recognizerInit = _initRecognizer();
 
-    // Camera will be initialized when moving to Step 2
+    // Start camera immediately (no form step)
+    initializeCamera();
   }
 
   Future<void> _initRecognizer() async {
@@ -173,43 +152,8 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
   @override
   void dispose() {
-    _pageController.dispose();
-    _namaLengkapController.dispose();
-    _identityController.dispose();
-    _phoneController.dispose();
-    _emailController.dispose();
     controller?.dispose();
     super.dispose();
-  }
-
-  // Step 1 Methods - Form Validation and Navigation
-  String _getIdentityLabel() {
-    if (_selectedStatus == 'Mahasiswa') return 'NPM';
-    return 'NIP';
-  }
-
-  void _nextStep() {
-    if (_formKey.currentState!.validate()) {
-      // Initialize camera when moving to Step 2
-      initializeCamera();
-      _pageController.nextPage(
-        duration: const Duration(milliseconds: 300),
-        curve: Curves.easeInOut,
-      );
-      setState(() {
-        _currentPage = 1;
-      });
-    }
-  }
-
-  void _previousStep() {
-    _pageController.previousPage(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
-    );
-    setState(() {
-      _currentPage = 0;
-    });
   }
 
   //TODO code to initialize the camera feed
@@ -230,10 +174,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       controller = CameraController(
         description,
         ResolutionPreset.medium,
-        imageFormatGroup:
-            Platform.isAndroid
-                ? ImageFormatGroup.nv21
-                : ImageFormatGroup.yuv420,
+        imageFormatGroup: ImageFormatGroup.nv21,
         enableAudio: false,
       );
 
@@ -289,7 +230,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
       // GUARD: Tolak frame jika terlalu gelap (Auto-exposure belum stabil)
       if (mean < 50) {
-        _log.d('[REG] Face is too dark (mean luma=${mean.toStringAsFixed(1)} < 50)');
+        _log.d(
+          '[REG] Face is too dark (mean luma=${mean.toStringAsFixed(1)} < 50)',
+        );
         return false;
       }
 
@@ -306,7 +249,8 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       _log.d(
         '[REG] sharpness variance=${variance.toStringAsFixed(1)} (threshold=50), luma=${mean.toStringAsFixed(1)}',
       );
-      return variance > 50; // Lowered threshold — mobile cameras are generally adequate
+      return variance >
+          50; // Lowered threshold — mobile cameras are generally adequate
     } catch (e) {
       _log.w('[REG] Sharpness check error - assuming sharp', e);
       return true;
@@ -371,12 +315,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
       }
 
       // Step 1: Convert NV21 → landscape image (raw, no rotation)
-      img.Image? tempImage;
-      if (Platform.isIOS) {
-        tempImage = await compute(Util.convertBGRA8888ToImage, frame!);
-      } else {
-        tempImage = await compute(Util.convertNV21, frame!);
-      }
+      img.Image? tempImage = await compute(Util.convertNV21, frame!);
       if (tempImage == null) {
         isBusy = false;
         return;
@@ -518,10 +457,27 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         frontFace = cropped;
       }
 
-      Recognition recognition = recognizer.recognize(cropped, face.boundingBox);
+      Recognition recognition = recognizer.recognizeCropped(
+        cropped,
+        face.boundingBox,
+      );
+
+      if (recognition.name.startsWith('__')) {
+        _log.d('[REG] Skipping sentinel result: ${recognition.name}');
+        if (mounted) {
+          setState(() {
+            isBusy = false;
+            getEmb = false;
+          });
+        } else {
+          isBusy = false;
+          getEmb = false;
+        }
+        return;
+      }
 
       // NaN guard: jika model menghasilkan NaN, coba frame berikutnya
-      if (recognition.distance == -2) {
+      if (recognition.score == -2) {
         _log.w(
           '[REG] NaN embedding for step $_currentStep - retrying next frame',
         );
@@ -585,7 +541,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   TextEditingController textEditingController = TextEditingController();
   showFaceRegistrationDialogue(img.Image croppedFace) {
     dialogShown = true;
-    String userName = _namaLengkapController.text.trim();
+    textEditingController.clear();
 
     showDialog(
       context: context,
@@ -612,23 +568,20 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  Card.outlined(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _buildInfoRow('Nama', userName),
-                          const Divider(height: 16),
-                          _buildInfoRow('Status', _selectedStatus ?? '-'),
-                          const Divider(height: 16),
-                          _buildInfoRow('Unit', _selectedUnit ?? '-'),
-                          const Divider(height: 16),
-                          _buildInfoRow(
-                            _getIdentityLabel(),
-                            _identityController.text,
-                          ),
-                        ],
+                  TextFormField(
+                    controller: textEditingController,
+                    textCapitalization: TextCapitalization.words,
+                    decoration: InputDecoration(
+                      labelText: 'Nama',
+                      hintText: 'Masukkan nama',
+                      filled: true,
+                      fillColor: Colors.white,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
                       ),
                     ),
                   ),
@@ -649,7 +602,16 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
               FilledButton(
                 onPressed: () async {
                   // Buat salinan data sebelum state direset
-                  final String name = userName;
+                  final String name = textEditingController.text.trim();
+                  if (name.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Nama wajib diisi'),
+                        backgroundColor: Colors.red,
+                      ),
+                    );
+                    return;
+                  }
                   final List<List<double>> embs = List<List<double>>.from(
                     embeddings,
                   );
@@ -700,26 +662,6 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     );
   }
 
-  Widget _buildInfoRow(String label, String value) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Text(
-          label,
-          style: const TextStyle(fontSize: 14, color: Color(0xFF6B7280)),
-        ),
-        Text(
-          value,
-          style: const TextStyle(
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
-            color: Color(0xFF09090b),
-          ),
-        ),
-      ],
-    );
-  }
-
   // //TODO convert CameraImage to InputImage
   final _orientations = {
     DeviceOrientation.portraitUp: 0,
@@ -738,28 +680,22 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     final sensorOrientation = camera.sensorOrientation;
 
     InputImageRotation? rotation;
-    if (Platform.isIOS) {
-      rotation = InputImageRotationValue.fromRawValue(sensorOrientation);
-    } else if (Platform.isAndroid) {
-      var rotationCompensation =
-          _orientations[controller!.value.deviceOrientation];
-      if (rotationCompensation == null) return null;
-      if (camera.lensDirection == CameraLensDirection.front) {
-        // front-facing
-        rotationCompensation = (sensorOrientation + rotationCompensation) % 360;
-      } else {
-        // back-facing
-        rotationCompensation =
-            (sensorOrientation - rotationCompensation + 360) % 360;
-      }
-      rotation = InputImageRotationValue.fromRawValue(rotationCompensation);
+    var rotationCompensation =
+        _orientations[controller!.value.deviceOrientation];
+    if (rotationCompensation == null) return null;
+    if (camera.lensDirection == CameraLensDirection.front) {
+      // front-facing
+      rotationCompensation = (sensorOrientation + rotationCompensation) % 360;
+    } else {
+      // back-facing
+      rotationCompensation =
+          (sensorOrientation - rotationCompensation + 360) % 360;
     }
+    rotation = InputImageRotationValue.fromRawValue(rotationCompensation);
     if (rotation == null) return null;
 
     final format = InputImageFormatValue.fromRawValue(frame!.format.raw);
-    if (format == null ||
-        (Platform.isAndroid && format != InputImageFormat.nv21) ||
-        (Platform.isIOS && format != InputImageFormat.bgra8888)) {
+    if (format == null || format != InputImageFormat.nv21) {
       return null;
     }
 
@@ -926,18 +862,12 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         leading: IconButton(
           icon: const Icon(Icons.arrow_back, color: Color(0xFF09090b)),
           onPressed: () {
-            if (_currentPage == 1) {
-              _previousStep();
-            } else {
-              Navigator.pop(context);
-            }
+            Navigator.pop(context);
           },
         ),
-        title: Text(
-          _currentPage == 0
-              ? 'Registration - User Data'
-              : 'Registration - Face Capture',
-          style: const TextStyle(
+        title: const Text(
+          'Registration - Face Capture',
+          style: TextStyle(
             color: Color(0xFF09090b),
             fontSize: 18,
             fontWeight: FontWeight.w600,
@@ -948,459 +878,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
           child: Container(color: const Color(0xFFE5E7EB), height: 1),
         ),
       ),
-      body: PageView(
-        controller: _pageController,
-        physics: const NeverScrollableScrollPhysics(),
-        onPageChanged: (page) {
-          setState(() {
-            _currentPage = page;
-          });
-        },
-        children: [_buildStep1(), _buildStep2()],
-      ),
-    );
-  }
-
-  // Step 1: User Data Form
-  Widget _buildStep1() {
-    return SingleChildScrollView(
-      child: Padding(
-        padding: const EdgeInsets.all(20.0),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const SizedBox(height: 8),
-              const Text(
-                'Personal Information',
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF09090b),
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Text(
-                'Please fill in your information to proceed with face registration.',
-                style: TextStyle(fontSize: 14, color: Color(0xFF6B7280)),
-              ),
-              const SizedBox(height: 24),
-
-              // Nama Lengkap (Full Name)
-              const Text(
-                'Nama Lengkap',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF09090b),
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextFormField(
-                controller: _namaLengkapController,
-                keyboardType: TextInputType.name,
-                textCapitalization: TextCapitalization.words,
-                decoration: InputDecoration(
-                  hintText: 'Enter your full name',
-                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: Color(0xFF09090b),
-                      width: 2,
-                    ),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter your full name';
-                  }
-                  if (value.length < 3) {
-                    return 'Name must be at least 3 characters';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 20),
-
-              // Status Dropdown
-              const Text(
-                'Status',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF09090b),
-                ),
-              ),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                decoration: InputDecoration(
-                  hintText: 'Select your status',
-                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: Color(0xFF09090b),
-                      width: 2,
-                    ),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                ),
-                items:
-                    ['Dosen', 'Tendik', 'Mahasiswa']
-                        .map(
-                          (status) => DropdownMenuItem(
-                            value: status,
-                            child: Text(status),
-                          ),
-                        )
-                        .toList(),
-                onChanged: (value) {
-                  setState(() {
-                    _selectedStatus = value;
-                    // Auto-select Fakultas for Mahasiswa
-                    if (value == 'Mahasiswa') {
-                      _selectedUnitType = 'Fakultas';
-                    } else {
-                      _selectedUnitType = null;
-                    }
-                    _selectedUnit = null;
-                  });
-                },
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please select your status';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 20),
-
-              // Unit Type Dropdown
-              const Text(
-                'Unit Type',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF09090b),
-                ),
-              ),
-              const SizedBox(height: 8),
-              DropdownButtonFormField<String>(
-                key: ValueKey(_selectedUnitType),
-                initialValue: _selectedUnitType,
-                decoration: InputDecoration(
-                  hintText: 'Select unit type',
-                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: Color(0xFF09090b),
-                      width: 2,
-                    ),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                ),
-                items:
-                    (_selectedStatus == 'Mahasiswa'
-                            ? ['Fakultas']
-                            : ['UPA', 'Lembaga', 'Fakultas'])
-                        .map(
-                          (type) =>
-                              DropdownMenuItem(value: type, child: Text(type)),
-                        )
-                        .toList(),
-                onChanged: (value) {
-                  setState(() {
-                    _selectedUnitType = value;
-                    _selectedUnit = null;
-                  });
-                },
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please select unit type';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 20),
-
-              // Cascading Unit Kerja Dropdown
-              if (_selectedUnitType != null) ...[
-                const Text(
-                  'Unit Kerja',
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF09090b),
-                  ),
-                ),
-                const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  decoration: InputDecoration(
-                    hintText: 'Select unit kerja',
-                    hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
-                    filled: true,
-                    fillColor: Colors.white,
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                    ),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(8),
-                      borderSide: const BorderSide(
-                        color: Color(0xFF09090b),
-                        width: 2,
-                      ),
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 14,
-                    ),
-                  ),
-                  items:
-                      _unitKerjaData[_selectedUnitType]!
-                          .map(
-                            (unit) => DropdownMenuItem(
-                              value: unit,
-                              child: Text(unit),
-                            ),
-                          )
-                          .toList(),
-                  onChanged: (value) {
-                    setState(() {
-                      _selectedUnit = value;
-                    });
-                  },
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please select unit kerja';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 20),
-              ],
-
-              // Dynamic Identity Field (NIP/NPM)
-              Text(
-                _getIdentityLabel(),
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF09090b),
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextFormField(
-                controller: _identityController,
-                keyboardType: TextInputType.number,
-                decoration: InputDecoration(
-                  hintText: 'Enter your ${_getIdentityLabel()}',
-                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: Color(0xFF09090b),
-                      width: 2,
-                    ),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter your ${_getIdentityLabel()}';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 20),
-
-              // Phone Number
-              const Text(
-                'Phone Number',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF09090b),
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextFormField(
-                controller: _phoneController,
-                keyboardType: TextInputType.phone,
-                decoration: InputDecoration(
-                  hintText: 'Enter your phone number',
-                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: Color(0xFF09090b),
-                      width: 2,
-                    ),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter your phone number';
-                  }
-                  if (!RegExp(r'^[0-9]+$').hasMatch(value)) {
-                    return 'Please enter a valid phone number';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 20),
-
-              // Email
-              const Text(
-                'Email',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF09090b),
-                ),
-              ),
-              const SizedBox(height: 8),
-              TextFormField(
-                controller: _emailController,
-                keyboardType: TextInputType.emailAddress,
-                decoration: InputDecoration(
-                  hintText: 'Enter your email',
-                  hintStyle: const TextStyle(color: Color(0xFF9CA3AF)),
-                  filled: true,
-                  fillColor: Colors.white,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(color: Color(0xFFD1D5DB)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(8),
-                    borderSide: const BorderSide(
-                      color: Color(0xFF09090b),
-                      width: 2,
-                    ),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter your email';
-                  }
-                  if (!RegExp(
-                    r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
-                  ).hasMatch(value)) {
-                    return 'Please enter a valid email';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 32),
-
-              // Next Button
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _nextStep,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF09090b),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    elevation: 0,
-                  ),
-                  child: const Text(
-                    'Next: Face Capture',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-            ],
-          ),
-        ),
-      ),
+      body: _buildStep2(),
     );
   }
 

@@ -4,9 +4,8 @@ class Recognition {
   String name;
   Rect location;
   List<double> embeddings;
-  double distance;
+  double score;
+
   /// Constructs a Category.
-  Recognition(this.name, this.location,this.embeddings,this.distance);
-
+  Recognition(this.name, this.location, this.embeddings, this.score);
 }
-

@@ -4,7 +4,6 @@ import 'package:camera/camera.dart';
 import 'package:image/image.dart' as img;
 
 class Util {
-  static var iosBytesOffset = 28;
   static img.Image convertBGRA8888ToImage(CameraImage cameraImage) {
     final plane = cameraImage.planes[0];
 
@@ -13,7 +12,6 @@ class Util {
       height: cameraImage.height,
       bytes: plane.bytes.buffer,
       rowStride: plane.bytesPerRow,
-      bytesOffset: iosBytesOffset,
       order: img.ChannelOrder.bgra,
     );
   }

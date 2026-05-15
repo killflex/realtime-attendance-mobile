@@ -22,7 +22,11 @@ Future<void> setupLocator() async {
     () => Recognizer(faceRepository: getIt<FaceRepository>(), numThreads: 2),
   );
   getIt.registerLazySingleton<FaceDetector>(() {
-    final options = FaceDetectorOptions(performanceMode: FaceDetectorMode.fast);
+    final options = FaceDetectorOptions(
+      performanceMode: FaceDetectorMode.accurate,
+      minFaceSize: 0.15,
+      enableTracking: true,
+    );
     return FaceDetector(options: options);
   });
 }

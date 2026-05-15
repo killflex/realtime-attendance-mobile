@@ -13,16 +13,19 @@ import 'recognition.dart';
 class Recognizer {
   Interpreter? _interpreter;
   late InterpreterOptions _interpreterOptions;
+
   static const int inputWidth = 112;
   static const int inputHeight = 112;
   static const int outputSize = 128;
+
   final FaceRepository _faceRepository;
   final AppLogger _log = AppLogger();
+
   Map<String, List<List<double>>> registered = {};
 
-  // Cache untuk optimasi
-
-  String get modelName => 'assets/mobilefacenet_f32.tflite';
+  // Model yang sedang digunakan.
+  // Ganti path ini jika ingin memakai Dynamic Range atau Float16.
+  String get modelName => 'assets/mobilefacenet_baseline_f32.tflite';
 
   bool _isLoaded = false;
   Future<void>? _initFuture;
@@ -37,7 +40,6 @@ class Recognizer {
     if (numThreads != null) {
       _interpreterOptions.threads = numThreads;
     }
-    // Initialization is async; callers should await init().
   }
 
   Future<void> init() async {
@@ -47,27 +49,34 @@ class Recognizer {
 
   Future<void> _initInternal() async {
     await loadModel();
+
     try {
       await initDB();
     } catch (e, st) {
-      // DB init failure is non-fatal: model inference still works
-      // Registered faces just won't be loaded from DB
+      // DB init failure is non-fatal: model inference still works.
+      // Registered faces just won't be loaded from DB.
       _log.w('Recognizer initDB error (non-fatal, continuing).', e, st);
     }
   }
 
-  initDB() async {
+  Future<void> initDB() async {
     await _faceRepository.init();
-    loadRegisteredFaces();
+    await loadRegisteredFaces();
   }
 
   Future<void> loadRegisteredFaces() async {
     registered.clear();
+
     final records = await _faceRepository.getAllFaces();
+
     for (final record in records) {
-      registered[record.name] = record.embeddings;
+      // Normalisasi defensif saat load dari DB.
+      // Ini memastikan embedding database konsisten dengan threshold cosine.
+      registered[record.name] =
+          record.embeddings.map((embedding) => l2Normalize(embedding)).toList();
+
       _log.d(
-        'Loaded ${record.embeddings.length} embeddings for ${record.name}',
+        'Loaded ${record.embeddings.length} normalized embeddings for ${record.name}',
       );
     }
   }
@@ -79,10 +88,9 @@ class Recognizer {
     img.Image? image = img.decodeImage(imageData);
     if (image == null) throw Exception('Image decoding failed');
 
-    // Resize to smaller dimensions if necessary
-    img.Image resized = img.copyResize(image, width: 300); // ~300px width
+    img.Image resized = img.copyResize(image, width: 300);
 
-    int quality = 85; // Start with high quality
+    int quality = 85;
     Uint8List jpg;
 
     do {
@@ -99,28 +107,43 @@ class Recognizer {
     Uint8List faceImage,
   ) async {
     final Uint8List compressedImage = await compressImage(faceImage);
+
+    // Normalisasi defensif sebelum disimpan ke database.
+    final List<List<double>> normalizedEmbeddings =
+        embeddings.map((embedding) => l2Normalize(embedding)).toList();
+
     final record = FaceRecord(
       name: name,
-      embeddings: embeddings,
+      embeddings: normalizedEmbeddings,
       imageBytes: compressedImage,
     );
-    final int id = await _faceRepository.insertFace(record);
-    _log.i('Registered "$name" to DB id=$id embeddings=${embeddings.length}');
 
-    // Reload in-memory map so recognition works immediately after registration
+    final int id = await _faceRepository.insertFace(record);
+
+    _log.i(
+      'Registered "$name" to DB id=$id embeddings=${normalizedEmbeddings.length}',
+    );
+
     await loadRegisteredFaces();
   }
 
   Future<void> loadModel() async {
     try {
       _log.i('Loading model: $modelName');
+
       _interpreter = await Interpreter.fromAsset(
         modelName,
         options: _interpreterOptions,
       );
+
       _isLoaded = true;
+
       _log.i(
         'Model loaded. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
+      );
+
+      _log.i(
+        'Cosine threshold for current model: ${cosineThreshold.toStringAsFixed(6)}',
       );
     } catch (e, st) {
       _isLoaded = false;
@@ -128,20 +151,188 @@ class Recognizer {
     }
   }
 
+  // ============================================================
+  // THRESHOLD BERDASARKAN MODEL YANG DIMUAT
+  // ============================================================
+  //
+  // Threshold ini berasal dari evaluasi LFW:
+  //
+  // Float32:
+  //   cosine threshold = 0.950696
+  //
+  // Dynamic Range:
+  //   cosine threshold = 0.950633
+  //
+  // Float16:
+  //   cosine threshold = 0.950688
+  //
+  // Karena sekarang aplikasi memakai cosine similarity:
+  //   similarity >= threshold → wajah sama
+  //   similarity < threshold  → Unknown
+  //
+  double get cosineThreshold {
+    final String lowerName = modelName.toLowerCase();
+
+    if (lowerName.contains('dynamic') ||
+        lowerName.contains('int8') ||
+        lowerName.contains('dynamic_range')) {
+      return 0.980;
+    }
+
+    if (lowerName.contains('float16') || lowerName.contains('fp16')) {
+      return 0.980;
+    }
+
+    if (lowerName.contains('baseline') ||
+        lowerName.contains('f32') ||
+        lowerName.contains('float32')) {
+      return 0.965;
+    }
+
+    // Default aman jika nama model tidak dikenali.
+    return 0.960;
+  }
+
+  // ============================================================
+  // L2 NORMALIZATION DEFENSIF
+  // ============================================================
+  //
+  // Walaupun model sudah menghasilkan embedding L2-normalized,
+  // fungsi ini tetap digunakan agar embedding query dan database
+  // selalu konsisten.
+  //
+  List<double> l2Normalize(List<double> emb) {
+    double norm = 0.0;
+
+    for (final double v in emb) {
+      if (v.isNaN || v.isInfinite) {
+        return emb;
+      }
+      norm += v * v;
+    }
+
+    norm = sqrt(norm);
+
+    if (norm < 1e-10) {
+      return emb;
+    }
+
+    return emb.map((v) => v / norm).toList();
+  }
+
+  // ============================================================
+  // COSINE SIMILARITY
+  // ============================================================
+  //
+  // Karena embedding sudah L2-normalized, dot product sama dengan
+  // cosine similarity.
+  //
+  double cosineSimilarity(List<double> emb1, List<double> emb2) {
+    final int len = min(emb1.length, emb2.length);
+
+    double dotProduct = 0.0;
+
+    for (int i = 0; i < len; i++) {
+      dotProduct += emb1[i] * emb2[i];
+    }
+
+    // Clamp agar aman dari error numerik kecil.
+    if (dotProduct > 1.0) return 1.0;
+    if (dotProduct < -1.0) return -1.0;
+
+    return dotProduct;
+  }
+
+  // ============================================================
+  // CROP WAJAH DARI FRAME
+  // ============================================================
+  //
+  // Fungsi ini memastikan input yang masuk ke model adalah crop wajah,
+  // bukan full frame. Rect location diasumsikan sebagai bounding box
+  // wajah dari face detector.
+  //
+  // Jika location tidak valid atau crop gagal, fallback ke image asli.
+  //
+  img.Image cropFaceFromLocation(img.Image source, Rect location) {
+    if (source.width <= 0 || source.height <= 0) {
+      return source;
+    }
+
+    if (location.width <= 1 || location.height <= 1) {
+      _log.w('Invalid face Rect. Using original image as fallback.');
+      return source;
+    }
+
+    // Tambahkan sedikit margin agar area wajah tidak terlalu ketat.
+    // const double marginRatio = 0.15;
+    const double marginRatio = 0.05;
+
+    final double marginX = location.width * marginRatio;
+    final double marginY = location.height * marginRatio;
+
+    int x = (location.left - marginX).round();
+    int y = (location.top - marginY).round();
+    int w = (location.width + 2 * marginX).round();
+    int h = (location.height + 2 * marginY).round();
+
+    x = max(0, x);
+    y = max(0, y);
+
+    if (x >= source.width || y >= source.height) {
+      _log.w('Face Rect outside image. Skipping crop.');
+      return source;
+    }
+
+    if (x + w > source.width) {
+      w = source.width - x;
+    }
+
+    if (y + h > source.height) {
+      h = source.height - y;
+    }
+
+    if (w <= 1 || h <= 1) {
+      _log.w('Invalid cropped face size. Skipping crop.');
+      return source;
+    }
+
+    try {
+      final img.Image croppedFace = img.copyCrop(
+        source,
+        x: x,
+        y: y,
+        width: w,
+        height: h,
+      );
+
+      _log.d(
+        'Face cropped: x=$x y=$y w=$w h=$h from image ${source.width}x${source.height}',
+      );
+
+      return croppedFace;
+    } catch (e, st) {
+      _log.w('Failed to crop face. Using original image as fallback.', e, st);
+      return source;
+    }
+  }
+
   List<dynamic> imageToArray(img.Image inputImage) {
-    img.Image resizedImage = img.copyResize(
+    final img.Image resizedImage = img.copyResize(
       inputImage,
       width: inputWidth,
       height: inputHeight,
     );
 
-    // Extract only R, G, B channels (not alpha) and normalize to [-1, 1]
+    // Extract R, G, B channels dan normalisasi ke [-1, 1].
     final int totalPixels = inputWidth * inputHeight;
-    Float32List inputBuffer = Float32List(totalPixels * 3);
+    final Float32List inputBuffer = Float32List(totalPixels * 3);
+
     int idx = 0;
+
     for (int y = 0; y < inputHeight; y++) {
       for (int x = 0; x < inputWidth; x++) {
         final pixel = resizedImage.getPixel(x, y);
+
         inputBuffer[idx++] = (pixel.r.toDouble() - 127.5) / 127.5;
         inputBuffer[idx++] = (pixel.g.toDouble() - 127.5) / 127.5;
         inputBuffer[idx++] = (pixel.b.toDouble() - 127.5) / 127.5;
@@ -151,14 +342,19 @@ class Recognizer {
     return inputBuffer.reshape([1, inputHeight, inputWidth, 3]);
   }
 
-  Recognition recognize(img.Image image, Rect location) {
-    //TODO crop face from image resize it and convert it to float array
+  Recognition recognizeCropped(img.Image croppedFace, Rect location) {
     if (!isReady) {
-      return Recognition('Unknown', location, List.filled(outputSize, 0.0), -1);
+      return Recognition(
+        '__not_ready__',
+        location,
+        List.filled(outputSize, 0.0),
+        -1,
+      );
     }
 
     if (_isRunning) {
       _log.w('Recognizer busy - skipping frame');
+
       return Recognition(
         '__busy__',
         location,
@@ -168,30 +364,36 @@ class Recognizer {
     }
 
     _isRunning = true;
+
     List<double> outputArray;
     int run;
+
     try {
-      var input = imageToArray(image);
+      final input = imageToArray(croppedFace);
+
       _log.d('Input shape: ${input.shape}');
 
-      // CRITICAL: output buffer MUST be a List<List<double>> — int or bare list causes silent failure
+      // Output buffer harus List<List<double>>.
       final List<List<double>> output = [List.filled(outputSize, 0.0)];
 
-      //TODO performs inference
-      final runs = DateTime.now().millisecondsSinceEpoch;
+      final int runs = DateTime.now().millisecondsSinceEpoch;
+
       _interpreter!.run(input, output);
+
       run = DateTime.now().millisecondsSinceEpoch - runs;
 
-      outputArray = output[0];
+      // Normalisasi defensif output embedding.
+      outputArray = l2Normalize(output[0]);
     } finally {
       _isRunning = false;
     }
 
-    // Guard: NaN/Inf embedding means model failed for this crop (bad input region)
+    // Guard: NaN/Inf embedding berarti model gagal untuk crop ini.
     final bool hasNaN = outputArray.any((v) => v.isNaN || v.isInfinite);
+
     if (hasNaN) {
       _log.w('NaN/Inf in embedding - invalid crop or model issue. Skipping.');
-      // distance = -2 signals "bad embedding" to callers (distinct from -5 = no DB)
+
       return Recognition(
         '__invalid__',
         location,
@@ -204,54 +406,142 @@ class Recognizer {
       'Inference time: ${run}ms | embedding[0..4]: ${outputArray.sublist(0, 4).map((v) => v.toStringAsFixed(4))}',
     );
 
-    //TODO looks for the nearest embeeding in the database and returns the pair
-    Pair pair = findNearest(outputArray);
-    _log.d('Distance: ${pair.distance}');
+    // Cari identity dengan cosine similarity tertinggi.
+    final Pair pair = findNearest(outputArray);
 
-    return Recognition(pair.name, location, outputArray, pair.distance);
+    _log.d(
+      'Best match: ${pair.name} | cosine similarity: ${pair.score.toStringAsFixed(6)} | threshold: ${cosineThreshold.toStringAsFixed(6)}',
+    );
+
+    // Catatan:
+    // Recognition field terakhir sekarang menyimpan cosine similarity.
+    return Recognition(pair.name, location, outputArray, pair.score);
   }
 
-  //TODO  looks for the nearest embeeding in the database and returns the pair which contain information of registered face with which face is most similar
-  Pair findNearest(List<double> emb) {
-    Pair pair = Pair("Unknown", -5);
+  Recognition recognize(img.Image image, Rect location) {
+    if (!isReady) {
+      return Recognition(
+        '__not_ready__',
+        location,
+        List.filled(outputSize, 0.0),
+        -1,
+      );
+    }
 
-    // Early exit if no registered faces
+    if (_isRunning) {
+      _log.w('Recognizer busy - skipping frame');
+
+      return Recognition(
+        '__busy__',
+        location,
+        List.filled(outputSize, 0.0),
+        -3,
+      );
+    }
+
+    _isRunning = true;
+
+    List<double> outputArray;
+    int run;
+
+    try {
+      // Pastikan input model adalah crop wajah.
+      final img.Image faceCrop = cropFaceFromLocation(image, location);
+
+      final input = imageToArray(faceCrop);
+
+      _log.d('Input shape: ${input.shape}');
+
+      // Output buffer harus List<List<double>>.
+      final List<List<double>> output = [List.filled(outputSize, 0.0)];
+
+      final int runs = DateTime.now().millisecondsSinceEpoch;
+
+      _interpreter!.run(input, output);
+
+      run = DateTime.now().millisecondsSinceEpoch - runs;
+
+      // Normalisasi defensif output embedding.
+      outputArray = l2Normalize(output[0]);
+    } finally {
+      _isRunning = false;
+    }
+
+    // Guard: NaN/Inf embedding berarti model gagal untuk crop ini.
+    final bool hasNaN = outputArray.any((v) => v.isNaN || v.isInfinite);
+
+    if (hasNaN) {
+      _log.w('NaN/Inf in embedding - invalid crop or model issue. Skipping.');
+
+      return Recognition(
+        '__invalid__',
+        location,
+        List.filled(outputSize, 0.0),
+        -2,
+      );
+    }
+
+    _log.d(
+      'Inference time: ${run}ms | embedding[0..4]: ${outputArray.sublist(0, 4).map((v) => v.toStringAsFixed(4))}',
+    );
+
+    // Cari identity dengan cosine similarity tertinggi.
+    final Pair pair = findNearest(outputArray);
+
+    _log.d(
+      'Best match: ${pair.name} | cosine similarity: ${pair.score.toStringAsFixed(6)} | threshold: ${cosineThreshold.toStringAsFixed(6)}',
+    );
+
+    // Catatan:
+    // Recognition field terakhir sekarang menyimpan cosine similarity.
+    return Recognition(pair.name, location, outputArray, pair.score);
+  }
+
+  // ============================================================
+  // FIND NEAREST — COSINE SIMILARITY
+  // ============================================================
+  //
+  // Sebelumnya fungsi ini memakai Euclidean distance.
+  // Sekarang diganti menjadi cosine similarity.
+  //
+  // Rule:
+  //   similarity >= cosineThreshold → wajah sama
+  //   similarity < cosineThreshold  → Unknown
+  //
+  Pair findNearest(List<double> emb) {
+    Pair pair = Pair("Unknown", -5.0);
+
     if (registered.isEmpty) {
       return pair;
     }
+
+    final List<double> queryEmb = l2Normalize(emb);
 
     for (MapEntry<String, List<List<double>>> entry in registered.entries) {
       final String name = entry.key;
       final List<List<double>> storedEmbeddings = entry.value;
 
-      // Compare against all stored embeddings (multiple angles) and use the best match
-      double minDistance = double.infinity;
-      for (List<double> storedEmb in storedEmbeddings) {
-        // Use dot product for faster computation (no sqrt needed immediately)
-        double dotProduct = 0;
-        for (int i = 0; i < emb.length; i++) {
-          double diff = emb[i] - storedEmb[i];
-          dotProduct += diff * diff;
-        }
+      double maxSimilarity = -double.infinity;
 
-        // Only compute sqrt if needed (when comparing or final result)
-        if (dotProduct < minDistance) {
-          minDistance = dotProduct;
+      for (List<double> storedEmb in storedEmbeddings) {
+        final List<double> galleryEmb = l2Normalize(storedEmb);
+
+        final double similarity = cosineSimilarity(queryEmb, galleryEmb);
+
+        if (similarity > maxSimilarity) {
+          maxSimilarity = similarity;
         }
       }
 
-      // Compute actual Euclidean distance only for the best match
-      double similarity = sqrt(minDistance);
-
-      if (pair.distance == -5 || similarity < pair.distance) {
-        pair.distance = similarity;
+      if (pair.score == -5.0 || maxSimilarity > pair.score) {
+        pair.score = maxSimilarity;
         pair.name = name;
       }
     }
 
-    // MobileFaceNet L2-normalized: Euclidean distance range 0-2.
-    // Threshold 0.8 = cosine similarity ~0.68
-    if (pair.distance > 0.6 && pair.distance != -5) {
+    // Karena ini cosine similarity:
+    // semakin besar = semakin mirip.
+    if (pair.score < cosineThreshold && pair.score != -5.0) {
       pair.name = "Unknown";
     }
 
@@ -265,6 +555,9 @@ class Recognizer {
 
 class Pair {
   String name;
-  double distance;
-  Pair(this.name, this.distance);
+
+  // Sekarang field ini menyimpan cosine similarity, bukan distance.
+  double score;
+
+  Pair(this.name, this.score);
 }
