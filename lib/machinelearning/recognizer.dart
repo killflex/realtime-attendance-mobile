@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -11,7 +14,7 @@ import '../logging/app_logger.dart';
 import 'recognition.dart';
 
 class Recognizer {
-  Interpreter? _interpreter;
+  late Interpreter? _interpreter;
   late InterpreterOptions _interpreterOptions;
 
   static const int inputWidth = 112;
@@ -21,11 +24,14 @@ class Recognizer {
   final FaceRepository _faceRepository;
   final AppLogger _log = AppLogger();
 
+  // Set to true to force CPU inference and test performance difference (A/B testing)
+  bool forceCpuOnly = false;
+
   Map<String, List<List<double>>> registered = {};
 
   // Model yang sedang digunakan.
   // Ganti path ini jika ingin memakai Dynamic Range atau Float16.
-  String get modelName => 'assets/mobilefacenet_baseline_f32.tflite';
+  String get modelName => 'assets/mobilefacenet_dynamic_range.tflite';
 
   bool _isLoaded = false;
   bool _isRunning = false;
@@ -131,25 +137,63 @@ class Recognizer {
 
   Future<void> loadModel() async {
     try {
-      _log.i('Loading model: $modelName');
+      final options = InterpreterOptions()..threads = 4;
 
-      _interpreter = await Interpreter.fromAsset(
-        modelName,
-        options: _interpreterOptions,
-      );
+      if (!forceCpuOnly) {
+        _log.i('Loading model: $modelName with Platform-specific GPU Delegate');
+        if (Platform.isAndroid) {
+          options.addDelegate(GpuDelegateV2(
+            options: GpuDelegateOptionsV2(
+              isPrecisionLossAllowed: true,
+              inferencePreference: TfLiteGpuInferenceUsage.fastSingleAnswer,
+              inferencePriority1: TfLiteGpuInferencePriority.minLatency,
+            ),
+          ));
+        } else if (Platform.isIOS) {
+          options.addDelegate(GpuDelegate(
+            options: GpuDelegateOptions(
+              allowPrecisionLoss: true,
+              waitType: TFLGpuDelegateWaitType.aggressive,
+            ),
+          ));
+        }
+      } else {
+        _log.i('Loading model: $modelName with CPU Only (A/B testing)');
+      }
+
+      _interpreter = await Interpreter.fromAsset(modelName, options: options);
 
       _isLoaded = true;
-
       _log.i(
-        'Model loaded. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
+        'Model loaded successfully${forceCpuOnly ? " (CPU Only)" : " with GPU Delegate"}. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
       );
+    } catch (e, st) {
+      _log.w(
+        'Failed to load model with GPU Delegate. Falling back to CPU.',
+        e,
+        st,
+      );
+      try {
+        // Fallback ke CPU jika GPU gagal
+        _interpreter = await Interpreter.fromAsset(
+          modelName,
+          options: _interpreterOptions,
+        );
 
+        _isLoaded = true;
+        _log.i(
+          'Model loaded successfully on CPU fallback. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
+        );
+      } catch (e2, st2) {
+        _isLoaded = false;
+        _log.e('Failed to load model on CPU fallback.', e2, st2);
+      }
+    }
+
+    if (_isLoaded) {
       _log.i(
         'Cosine threshold for current model: ${cosineThreshold.toStringAsFixed(6)}',
       );
-    } catch (e, st) {
-      _isLoaded = false;
-      _log.e('Failed to load model "$modelName".', e, st);
     }
   }
 
@@ -178,11 +222,11 @@ class Recognizer {
     if (lowerName.contains('dynamic') ||
         lowerName.contains('int8') ||
         lowerName.contains('dynamic_range')) {
-      return 0.980;
+      return 0.965;
     }
 
     if (lowerName.contains('float16') || lowerName.contains('fp16')) {
-      return 0.980;
+      return 0.965;
     }
 
     if (lowerName.contains('baseline') ||
@@ -344,7 +388,15 @@ class Recognizer {
     return inputBuffer.reshape([1, inputHeight, inputWidth, 3]);
   }
 
-  Recognition recognizeCropped(img.Image croppedFace, Rect location) {
+  List<dynamic> rgbBytesToArray(Uint8List rgbBytes) {
+    final Float32List inputBuffer = Float32List(inputWidth * inputHeight * 3);
+    for (int i = 0; i < rgbBytes.length; i++) {
+      inputBuffer[i] = (rgbBytes[i] - 127.5) / 127.5;
+    }
+    return inputBuffer.reshape([1, inputHeight, inputWidth, 3]);
+  }
+
+  Recognition recognizeCropped(Uint8List croppedFaceBytes, Rect location) {
     if (!isReady) {
       return Recognition(
         '__not_ready__',
@@ -371,7 +423,7 @@ class Recognizer {
     int run;
 
     try {
-      final input = imageToArray(croppedFace);
+      final input = rgbBytesToArray(croppedFaceBytes);
 
       _log.d('Input shape: ${input.shape}');
 
@@ -562,4 +614,101 @@ class Pair {
   double score;
 
   Pair(this.name, this.score);
+}
+
+// ============================================================
+// PERFORMANCE TRACKER — LATENCY & FPS MEASUREMENT
+// ============================================================
+//
+// Kelas ini mengukur latency inference per frame dan FPS real-time.
+// Digunakan untuk pengujian performa model tanpa I/O.
+//
+class PerformanceTracker {
+  late Stopwatch _frameStopwatch;
+  List<int> latencies = []; // Latency per frame (ms)
+  List<double> instantFpsList = []; // FPS per detik
+  DateTime? _lastSecondMark;
+  int _framesThisSecond = 0;
+
+  PerformanceTracker() {
+    _frameStopwatch = Stopwatch();
+    _lastSecondMark = DateTime.now();
+  }
+
+  /// Start measuring latency untuk frame saat ini.
+  void startFrameMeasure() {
+    _frameStopwatch.reset();
+    _frameStopwatch.start();
+  }
+
+  /// Stop measuring dan simpan latency. Update FPS counter.
+  void stopFrameMeasure() {
+    _frameStopwatch.stop();
+    latencies.add(_frameStopwatch.elapsedMilliseconds);
+    _framesThisSecond++;
+
+    final now = DateTime.now();
+    if (now.difference(_lastSecondMark!).inMilliseconds >= 1000) {
+      instantFpsList.add(_framesThisSecond.toDouble());
+      _framesThisSecond = 0;
+      _lastSecondMark = now;
+    }
+  }
+
+  /// Reset tracker (untuk memulai test session baru).
+  void reset() {
+    latencies.clear();
+    instantFpsList.clear();
+    _framesThisSecond = 0;
+    _lastSecondMark = DateTime.now();
+  }
+
+  /// Hitung statistik akhir dalam format JSON.
+  String getStatsAsJson() {
+    if (latencies.isEmpty) {
+      return jsonEncode({'error': 'No data collected'});
+    }
+
+    // Latency stats
+    final meanLatency = latencies.reduce((a, b) => a + b) / latencies.length;
+    final maxLatency = latencies.reduce((a, b) => a > b ? a : b);
+    final minLatency = latencies.reduce((a, b) => a < b ? a : b);
+
+    // FPS stats
+    double meanFps = 0.0;
+    double maxFps = 0.0;
+    double minFps = double.infinity;
+
+    if (instantFpsList.isNotEmpty) {
+      meanFps = instantFpsList.reduce((a, b) => a + b) / instantFpsList.length;
+      maxFps = instantFpsList.reduce((a, b) => a > b ? a : b);
+      minFps = instantFpsList.reduce((a, b) => a < b ? a : b);
+    }
+
+    final stats = {
+      'total_frames': latencies.length,
+      'latency_ms': {
+        'mean': double.parse(meanLatency.toStringAsFixed(2)),
+        'max': maxLatency,
+        'min': minLatency,
+      },
+      'fps': {
+        'mean': double.parse(meanFps.toStringAsFixed(2)),
+        'max': double.parse(maxFps.toStringAsFixed(2)),
+        'min': double.parse(minFps.toStringAsFixed(2)),
+      },
+    };
+
+    return jsonEncode(stats);
+  }
+
+  /// Get current moving average FPS (last instant FPS value).
+  double get currentInstantFps =>
+      instantFpsList.isEmpty ? 0.0 : instantFpsList.last;
+
+  /// Get current average latency (mean of all latencies).
+  double get currentAverageLatency =>
+      latencies.isEmpty
+          ? 0.0
+          : latencies.reduce((a, b) => a + b) / latencies.length;
 }

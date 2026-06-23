@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:isolate';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/foundation.dart';
@@ -9,7 +11,7 @@ import 'package:image/image.dart' as img;
 import 'package:realtime_attendance_mobile/di/service_locator.dart';
 import 'package:realtime_attendance_mobile/logging/app_logger.dart';
 import 'package:realtime_attendance_mobile/machinelearning/recognizer.dart';
-import 'package:realtime_attendance_mobile/util.dart';
+import 'package:tflite_flutter/tflite_flutter.dart';
 
 import '../machinelearning/recognition.dart';
 import '../main.dart';
@@ -21,7 +23,11 @@ class RecognitionScreen extends StatefulWidget {
   State<RecognitionScreen> createState() => _RecognitionScreenState();
 }
 
-class _RecognitionScreenState extends State<RecognitionScreen> {
+class _RecognitionScreenState extends State<RecognitionScreen>
+    with AutomaticKeepAliveClientMixin {
+  @override
+  bool get wantKeepAlive => true;
+
   final AppLogger _log = AppLogger();
   CameraController? controller;
   bool isBusy = false;
@@ -37,19 +43,25 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   late Recognizer recognizer;
   bool _recognizerReady = false;
 
-  // Performance optimization
-  DateTime? _lastProcessedTime;
-  static const _processingInterval = Duration(
-    milliseconds: 300,
-  ); // Process every 300ms
-  int _skipFrameCount = 0;
-  static const _skipFrames = 0; // Skip 2 frames between processing
+
   static const int _minFaceSizePx = 80;
   static const Duration _stableDuration = Duration(seconds: 1);
   static const double _liveThresholdOffset = 0.015;
 
   String? _lastName;
   DateTime? _stableSince;
+
+  // Performance tracking
+  late PerformanceTracker _performanceTracker;
+  bool _isTestingActive = false;
+  double _displayLatency = 0.0;
+  double _displayFps = 0.0;
+
+  // Background Isolate for Face Recognition
+  Isolate? _recognitionIsolate;
+  SendPort? _isolateSendPort;
+  ReceivePort? _isolateReceivePort;
+  bool _isolateReady = false;
 
   @override
   void initState() {
@@ -63,6 +75,12 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
 
     //TODO initialize face recognizer
     _initRecognizer();
+
+    // Initialize performance tracker
+    _performanceTracker = PerformanceTracker();
+
+    // Start background isolate initialization
+    _initIsolate();
 
     //TODO initialize camera footage
     initializeCamera();
@@ -132,20 +150,9 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
 
       controller!.startImageStream((image) {
         if (!isBusy) {
-          // Throttle processing with time-based check
-          final now = DateTime.now();
-          if (_lastProcessedTime == null ||
-              now.difference(_lastProcessedTime!) > _processingInterval) {
-            // Also skip frames for additional performance
-            _skipFrameCount++;
-            if (_skipFrameCount > _skipFrames) {
-              _skipFrameCount = 0;
-              isBusy = true;
-              frame = image;
-              _lastProcessedTime = now;
-              doFaceDetectionOnFrame();
-            }
-          }
+          isBusy = true;
+          frame = image;
+          doFaceDetectionOnFrame();
         }
       });
     } catch (e) {
@@ -166,6 +173,8 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   @override
   void dispose() {
     controller?.dispose();
+    _recognitionIsolate?.kill(priority: Isolate.beforeNextEvent);
+    _isolateReceivePort?.close();
     super.dispose();
   }
 
@@ -175,9 +184,13 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
 
   Future<void> doFaceDetectionOnFrame() async {
     try {
+      // Start measuring frame latency
+      _performanceTracker.startFrameMeasure();
+
       //TODO convert frame into InputImage format
       final inputImage = getInputImage();
       if (inputImage == null) {
+        _performanceTracker.stopFrameMeasure();
         if (mounted) {
           setState(() {
             isBusy = false;
@@ -192,7 +205,17 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
 
       //TODO perform face recognition on detected faces
       await performFaceRecognition(faces);
+
+      // Stop measuring and update display metrics
+      _performanceTracker.stopFrameMeasure();
+      if (mounted) {
+        setState(() {
+          _displayLatency = _performanceTracker.currentAverageLatency;
+          _displayFps = _performanceTracker.currentInstantFps;
+        });
+      }
     } catch (e) {
+      _performanceTracker.stopFrameMeasure();
       _log.e('Error in face detection', e);
       if (mounted) {
         setState(() {
@@ -203,6 +226,112 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
   }
 
   img.Image? image;
+
+  Future<void> _initIsolate() async {
+    try {
+      _isolateReceivePort = ReceivePort();
+      _recognitionIsolate = await Isolate.spawn(
+        _recognitionIsolateEntryPoint,
+        _isolateReceivePort!.sendPort,
+      );
+
+      _isolateSendPort = await _isolateReceivePort!.first as SendPort;
+
+      final token = RootIsolateToken.instance;
+      if (token == null) {
+        _log.w('RootIsolateToken is null, background isolate cannot access rootBundle assets.');
+        return;
+      }
+
+      final replyPort = ReceivePort();
+      _isolateSendPort!.send(IsolateInitMessage(
+        token: token,
+        modelName: recognizer.modelName,
+        forceCpuOnly: recognizer.forceCpuOnly,
+        replyPort: replyPort.sendPort,
+      ));
+
+      final initResult = await replyPort.first;
+      replyPort.close();
+
+      if (initResult == true) {
+        _log.i('Background isolate initialized successfully with model: ${recognizer.modelName}');
+        if (mounted) {
+          setState(() {
+            _isolateReady = true;
+          });
+        }
+      } else {
+        _log.e('Failed to initialize background isolate: $initResult');
+      }
+    } catch (e, st) {
+      _log.e('Error starting background isolate', e, st);
+    }
+  }
+
+  Uint8List _cropNv21ToRgb(CameraImage image, Rect cropRect) {
+    final int lsW = image.width;
+    final int lsH = image.height;
+    final Uint8List yuv420sp = image.planes[0].bytes;
+
+    const int targetW = 112;
+    const int targetH = 112;
+    final Uint8List rgbBytes = Uint8List(targetW * targetH * 3);
+
+    final double left = cropRect.left;
+    final double top = cropRect.top;
+    final double right = cropRect.right;
+    final double bottom = cropRect.bottom;
+    final double width = cropRect.width;
+    final double height = cropRect.height;
+
+    int outIdx = 0;
+
+    for (int y = 0; y < targetH; y++) {
+      final double yNorm = y / (targetH - 1);
+      for (int x = 0; x < targetW; x++) {
+        final double xNorm = x / (targetW - 1);
+
+        int sx;
+        int sy;
+
+        if (camDirec == CameraLensDirection.front) {
+          sx = (right - yNorm * width).round().clamp(0, lsW - 1);
+          sy = (top + xNorm * height).round().clamp(0, lsH - 1);
+        } else {
+          sx = (left + yNorm * width).round().clamp(0, lsW - 1);
+          sy = (bottom - xNorm * height).round().clamp(0, lsH - 1);
+        }
+
+        final int yIndex = sy * lsW + sx;
+        final int yValue = yuv420sp[yIndex] & 0xFF;
+
+        final int uvRow = sy >> 1;
+        final int uvCol = sx >> 1;
+        final int uvIndex = (lsW * lsH) + (uvRow * lsW) + (uvCol * 2);
+
+        final int vValue = yuv420sp[uvIndex] & 0xFF;
+        final int uValue = yuv420sp[uvIndex + 1] & 0xFF;
+
+        int yVal = yValue - 16;
+        if (yVal < 0) yVal = 0;
+        int vVal = vValue - 128;
+        int uVal = uValue - 128;
+
+        int y1192 = 1192 * yVal;
+        int r = (y1192 + 1634 * vVal) >> 10;
+        int g = (y1192 - 833 * vVal - 400 * uVal) >> 10;
+        int b = (y1192 + 2066 * uVal) >> 10;
+
+        rgbBytes[outIdx++] = r.clamp(0, 255);
+        rgbBytes[outIdx++] = g.clamp(0, 255);
+        rgbBytes[outIdx++] = b.clamp(0, 255);
+      }
+    }
+
+    return rgbBytes;
+  }
+
   //TODO perform Face Recognition
   Future<void> performFaceRecognition(List<Face> faces) async {
     try {
@@ -221,13 +350,6 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
         return;
       }
 
-      // Step 1: Convert NV21 → landscape (raw, no full rotation)
-      img.Image? originalImage = await compute(Util.convertNV21, frame!);
-      if (originalImage == null) {
-        if (mounted) setState(() => isBusy = false);
-        return;
-      }
-
       // Use the largest face for recognition to reduce false positives.
       Face face = faces.reduce((a, b) {
         final double areaA = a.boundingBox.width * a.boundingBox.height;
@@ -238,62 +360,64 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       final List<Recognition> currentRecognitions = [];
 
       try {
-        // Step 2: Transform portrait bbox → landscape coordinates
+        if (face.boundingBox.width < _minFaceSizePx ||
+            face.boundingBox.height < _minFaceSizePx) {
+          _log.d(
+            '[REC] Face too small: ${face.boundingBox.width}x${face.boundingBox.height} - skipping',
+          );
+          if (mounted) setState(() => isBusy = false);
+          return;
+        }
+
+        // Step 1: Transform portrait bbox → landscape coordinates using raw frame dimensions
         final Rect lsBox = _portraitBoxToLandscape(
           face.boundingBox,
-          originalImage.width,
-          originalImage.height,
+          frame!.width,
+          frame!.height,
         );
 
-        final int left =
-            lsBox.left.clamp(0.0, (originalImage.width - 1).toDouble()).toInt();
-        final int top =
-            lsBox.top.clamp(0.0, (originalImage.height - 1).toDouble()).toInt();
-        final int right =
-            lsBox.right
-                .clamp((left + 1).toDouble(), originalImage.width.toDouble())
-                .toInt();
-        final int bottom =
-            lsBox.bottom
-                .clamp((top + 1).toDouble(), originalImage.height.toDouble())
-                .toInt();
-        final int cropW = right - left;
-        final int cropH = bottom - top;
-
-        if (cropW <= 0 || cropH <= 0) {
-          if (mounted) setState(() => isBusy = false);
-          return;
-        }
-
-        if (cropW < _minFaceSizePx || cropH < _minFaceSizePx) {
-          _log.d('[REC] Face too small: ${cropW}x$cropH - skipping');
-          if (mounted) setState(() => isBusy = false);
-          return;
-        }
-
-        // Step 3: Crop small region from landscape
-        final img.Image croppedLandscape = img.copyCrop(
-          originalImage,
-          x: left,
-          y: top,
-          width: cropW,
-          height: cropH,
-        );
-
-        // Step 4: Rotate only the small crop
-        final img.Image croppedFace = img.copyRotate(
-          croppedLandscape,
-          angle: camDirec == CameraLensDirection.front ? 270 : 90,
-        );
+        // Step 2: Crop & Convert directly from NV21 bytes (without copyRotate or copyResize)
+        final Uint8List croppedFaceBytes = _cropNv21ToRgb(frame!, lsBox);
 
         _log.d(
-          '[REC] bbox=${face.boundingBox} cropSize=${croppedFace.width}x${croppedFace.height}',
+          '[REC] bbox=${face.boundingBox} cropSize=112x112 (direct RGB extraction)',
         );
 
-        Recognition recognition = recognizer.recognizeCropped(
-          croppedFace,
+        List<double> outputArray;
+        final int startTimeMs = DateTime.now().millisecondsSinceEpoch;
+
+        if (_isolateReady && _isolateSendPort != null) {
+          // Inference via background isolate
+          final replyPort = ReceivePort();
+          _isolateSendPort!.send(IsolateInferenceMessage(
+            rgbBytes: croppedFaceBytes,
+            replyPort: replyPort.sendPort,
+          ));
+          final dynamic result = await replyPort.first;
+          replyPort.close();
+
+          if (result is List<double>) {
+            outputArray = result;
+          } else {
+            throw Exception('Isolate inference failed: $result');
+          }
+        } else {
+          // Fallback to main thread
+          final rec = recognizer.recognizeCropped(croppedFaceBytes, face.boundingBox);
+          outputArray = rec.embeddings;
+        }
+
+        final int runTimeMs = DateTime.now().millisecondsSinceEpoch - startTimeMs;
+        _log.d('[REC] Total recognition time (inference + comms): ${runTimeMs}ms');
+
+        final Pair pair = recognizer.findNearest(outputArray);
+        final Recognition recognition = Recognition(
+          pair.name,
           face.boundingBox,
+          outputArray,
+          pair.score,
         );
+
         _log.d(
           '[REC] name=${recognition.name} score=${recognition.score.toStringAsFixed(3)}',
         );
@@ -455,6 +579,57 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
     return RepaintBoundary(child: CustomPaint(painter: painter));
   }
 
+  /// Start 15-second performance test session
+  void _startPerformanceTest() {
+    _performanceTracker.reset();
+    setState(() {
+      _isTestingActive = true;
+      // _testStartTime = DateTime.now();
+    });
+
+    // Schedule automatic stop after 15 seconds
+    Future.delayed(const Duration(seconds: 15), () {
+      _stopPerformanceTest();
+    });
+
+    _log.i('[TEST] Performance test started - 15 second measurement active');
+  }
+
+  /// Stop test and print statistics
+  void _stopPerformanceTest() {
+    setState(() {
+      _isTestingActive = false;
+    });
+
+    final statsJson = _performanceTracker.getStatsAsJson();
+    _log.i('[TEST] Performance test completed');
+    _log.i('[TEST] Statistics: $statsJson');
+
+    // Print to console for easy copy-paste
+    // ignore: avoid_print
+    print('═' * 60);
+    // ignore: avoid_print
+    print('PERFORMANCE TEST RESULTS (15 seconds)');
+    // ignore: avoid_print
+    print('═' * 60);
+    // ignore: avoid_print
+    print(statsJson);
+    // ignore: avoid_print
+    print('═' * 60);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text(
+            '✓ Test selesai. Lihat Console untuk hasil JSON.',
+          ),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
   //TODO toggle camera direction
   Future<void> _toggleCameraDirection() async {
     // Check if cameras are available
@@ -509,9 +684,6 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       }
 
       // Reset processing state
-      _skipFrameCount = 0;
-      _lastProcessedTime = null;
-
       setState(() {});
       await initializeCamera();
     } catch (e) {
@@ -529,6 +701,7 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     List<Widget> stackChildren = [];
     size = MediaQuery.of(context).size;
 
@@ -585,6 +758,99 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
       ),
     );
 
+    // OSD: Display Latency and FPS in top-right corner
+    if (!kReleaseMode) {
+      stackChildren.add(
+        Positioned(
+          top: 16,
+          right: 16,
+          child: SafeArea(
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.7),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.green, width: 1),
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Latency: ${_displayLatency.toStringAsFixed(1)} ms',
+                    style: const TextStyle(
+                      color: Colors.green,
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'FPS: ${_displayFps.toStringAsFixed(1)}',
+                    style: const TextStyle(
+                      color: Colors.green,
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Test button
+    if (!kReleaseMode) {
+      if (!_isTestingActive) {
+        stackChildren.add(
+          Positioned(
+            top: 80,
+            right: 16,
+            child: SafeArea(
+              child: FilledButton.tonalIcon(
+                style: FilledButton.styleFrom(
+                  backgroundColor: Colors.orange.withValues(alpha: 0.9),
+                ),
+                onPressed: _startPerformanceTest,
+                icon: const Icon(Icons.assessment_rounded),
+                label: const Text('Test (15s)'),
+              ),
+            ),
+          ),
+        );
+      } else {
+        stackChildren.add(
+          Positioned(
+            top: 80,
+            right: 16,
+            child: SafeArea(
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.9),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  '🔴 Testing...',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+    }
+
     stackChildren.add(
       Positioned(
         bottom: 40,
@@ -607,10 +873,12 @@ class _RecognitionScreenState extends State<RecognitionScreen> {
     return SafeArea(
       child: Scaffold(
         backgroundColor: Colors.black,
-        body: Container(
-          margin: const EdgeInsets.only(top: 0),
-          color: Colors.black,
-          child: Stack(children: stackChildren),
+        body: RepaintBoundary(
+          child: Container(
+            margin: const EdgeInsets.only(top: 0),
+            color: Colors.black,
+            child: Stack(children: stackChildren),
+          ),
         ),
       ),
     );
@@ -719,4 +987,93 @@ class FaceDetectorPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(FaceDetectorPainter oldDelegate) => true;
+}
+
+class IsolateInitMessage {
+  final RootIsolateToken token;
+  final String modelName;
+  final bool forceCpuOnly;
+  final SendPort replyPort;
+
+  IsolateInitMessage({
+    required this.token,
+    required this.modelName,
+    required this.forceCpuOnly,
+    required this.replyPort,
+  });
+}
+
+class IsolateInferenceMessage {
+  final Uint8List rgbBytes;
+  final SendPort replyPort;
+
+  IsolateInferenceMessage({
+    required this.rgbBytes,
+    required this.replyPort,
+  });
+}
+
+void _recognitionIsolateEntryPoint(SendPort mainSendPort) async {
+  final receivePort = ReceivePort();
+  mainSendPort.send(receivePort.sendPort);
+
+  Interpreter? interpreter;
+
+  await for (final message in receivePort) {
+    if (message is IsolateInitMessage) {
+      try {
+        BackgroundIsolateBinaryMessenger.ensureInitialized(message.token);
+        final options = InterpreterOptions()..threads = 4;
+
+        if (!message.forceCpuOnly) {
+          try {
+            if (Platform.isAndroid) {
+              options.addDelegate(GpuDelegateV2(
+                options: GpuDelegateOptionsV2(
+                  isPrecisionLossAllowed: true,
+                  inferencePreference: TfLiteGpuInferenceUsage.fastSingleAnswer,
+                  inferencePriority1: TfLiteGpuInferencePriority.minLatency,
+                ),
+              ));
+            } else if (Platform.isIOS) {
+              options.addDelegate(GpuDelegate(
+                options: GpuDelegateOptions(
+                  allowPrecisionLoss: true,
+                  waitType: TFLGpuDelegateWaitType.aggressive,
+                ),
+              ));
+            }
+          } catch (_) {
+            // Fallback CPU options will be used if delegate initialization fails
+          }
+        }
+
+        interpreter = await Interpreter.fromAsset(message.modelName, options: options);
+        message.replyPort.send(true);
+      } catch (e) {
+        message.replyPort.send(e.toString());
+      }
+    } else if (message is IsolateInferenceMessage) {
+      if (interpreter == null) {
+        message.replyPort.send(null);
+        continue;
+      }
+
+      try {
+        final rgbBytes = message.rgbBytes;
+        final Float32List inputBuffer = Float32List(112 * 112 * 3);
+        for (int i = 0; i < rgbBytes.length; i++) {
+          inputBuffer[i] = (rgbBytes[i] - 127.5) / 127.5;
+        }
+        final input = inputBuffer.reshape([1, 112, 112, 3]);
+
+        final List<List<double>> output = [List.filled(128, 0.0)];
+        interpreter.run(input, output);
+
+        message.replyPort.send(output[0]);
+      } catch (e) {
+        message.replyPort.send(e.toString());
+      }
+    }
+  }
 }

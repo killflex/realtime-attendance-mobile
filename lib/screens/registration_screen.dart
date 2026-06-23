@@ -1,5 +1,6 @@
+import 'dart:async';
+
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
@@ -44,13 +45,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   bool _recognizerReady = false;
   Future<void>? _recognizerInit;
 
-  // Performance optimization
-  DateTime? _lastProcessedTime;
-  static const _processingInterval = Duration(
-    milliseconds: 500,
-  ); // Slower for registration
-  int _skipFrameCount = 0;
-  static const _skipFrames = 3; // Skip more frames during registration
+
   static const int _minFaceSizePx = 60;
 
   int _currentStep = 0;
@@ -85,6 +80,11 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
   bool dialogShown = false;
   bool register = false;
+
+  // Timer control for 1.5 second pose hold
+  Timer? _poseHoldTimer;
+  bool _isHoldingPose = false;
+  int _holdTimeRemaining = 0; // ms
 
   @override
   void initState() {
@@ -152,6 +152,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   @override
   void dispose() {
     controller?.dispose();
+    _poseHoldTimer?.cancel();
     super.dispose();
   }
 
@@ -185,19 +186,9 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
       controller!.startImageStream((image) {
         if (!isBusy) {
-          // Throttle with time and frame skipping
-          final now = DateTime.now();
-          if (_lastProcessedTime == null ||
-              now.difference(_lastProcessedTime!) > _processingInterval) {
-            _skipFrameCount++;
-            if (_skipFrameCount > _skipFrames) {
-              _skipFrameCount = 0;
-              isBusy = true;
-              frame = image;
-              _lastProcessedTime = now;
-              doFaceDetectionOnFrame();
-            }
-          }
+          isBusy = true;
+          frame = image;
+          doFaceDetectionOnFrame();
         }
       });
     } catch (e) {
@@ -277,6 +268,12 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   //TODO face detection on a frame
   Future<void> doFaceDetectionOnFrame() async {
     try {
+      // Skip frame processing if holding pose (during 1.5s timer)
+      if (_isHoldingPose) {
+        isBusy = false;
+        return;
+      }
+
       if (frame == null || controller == null) {
         isBusy = false;
         return;
@@ -313,64 +310,26 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         return;
       }
 
-      // Step 1: Convert NV21 → landscape image (raw, no rotation)
-      img.Image? tempImage = await compute(Util.convertNV21, frame!);
-      if (tempImage == null) {
-        isBusy = false;
-        return;
-      }
-
-      // Step 2: Transform ML Kit portrait bbox → landscape coordinates
-      // ML Kit returns bbox in portrait (rotated) space. Transform back to avoid
-      // rotating the full ~3MB frame — instead we only rotate the small crop.
       final faceBox = face.boundingBox;
+      // Step 1: Transform ML Kit portrait bbox → landscape coordinates using raw frame dimensions
       final Rect lsBox = _portraitBoxToLandscape(
         faceBox,
-        tempImage.width,
-        tempImage.height,
+        frame!.width,
+        frame!.height,
       );
 
-      final int left =
-          lsBox.left.clamp(0.0, (tempImage.width - 1).toDouble()).toInt();
-      final int top =
-          lsBox.top.clamp(0.0, (tempImage.height - 1).toDouble()).toInt();
-      final int right =
-          lsBox.right
-              .clamp((left + 1).toDouble(), tempImage.width.toDouble())
-              .toInt();
-      final int bottom =
-          lsBox.bottom
-              .clamp((top + 1).toDouble(), tempImage.height.toDouble())
-              .toInt();
-      final int cropW = right - left;
-      final int cropH = bottom - top;
+      // Step 2: Crop & Rotate in a single pass directly from NV21 bytes!
+      final img.Image cropped = Util.convertNV21CropAndRotate(
+        frame!,
+        lsBox,
+        camDirec,
+      );
 
-      if (cropW <= 0 || cropH <= 0) {
-        _log.w('[REG] Invalid crop: ${cropW}x$cropH');
+      if (cropped.width < _minFaceSizePx || cropped.height < _minFaceSizePx) {
+        _log.d('[REG] Crop too small: ${cropped.width}x${cropped.height} - skipping');
         isBusy = false;
         return;
       }
-
-      if (cropW < _minFaceSizePx || cropH < _minFaceSizePx) {
-        _log.d('[REG] Crop too small: ${cropW}x$cropH - skipping');
-        isBusy = false;
-        return;
-      }
-
-      // Step 3: Crop SMALL region from landscape (cheap, ~200x200px vs 720x480)
-      final img.Image croppedLandscape = img.copyCrop(
-        tempImage,
-        x: left,
-        y: top,
-        width: cropW,
-        height: cropH,
-      );
-
-      // Step 4: Rotate only the small crop to portrait orientation
-      final img.Image cropped = img.copyRotate(
-        croppedLandscape,
-        angle: camDirec == CameraLensDirection.front ? 270 : 90,
-      );
 
       _log.d(
         '[REG] portrait_bbox=$faceBox cropSize=${cropped.width}x${cropped.height}',
@@ -384,7 +343,14 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         if (_validFrameCount >= _requiredValidFrames && !getEmb) {
           getEmb = true;
           _validFrameCount = 0;
-          performFaceRecognition(face, cropped);
+
+          // Store cropped face and start pose hold timer
+          frontFace = cropped;
+          _startPoseHoldTimer();
+
+          _log.d(
+            '[REG] Valid pose detected - starting 1.5s hold timer for step $_currentStep',
+          );
         }
       } else {
         _log.d('[REG] Face not sharp, skipping');
@@ -426,6 +392,135 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     }
   }
 
+  /// Start 1.5 second pose hold timer. After timer expires, process embedding.
+  void _startPoseHoldTimer() {
+    if (_isHoldingPose) return; // Avoid duplicate timers
+
+    _log.d('[REG] Starting 1.5s pose hold timer for step $_currentStep');
+
+    _poseHoldTimer?.cancel();
+    _isHoldingPose = true;
+    int elapsedMs = 0;
+    const holdDurationMs = 1500;
+    const updateIntervalMs = 50;
+
+    setState(() {
+      _holdTimeRemaining = holdDurationMs;
+    });
+
+    _poseHoldTimer = Timer.periodic(
+      const Duration(milliseconds: updateIntervalMs),
+      (timer) {
+        elapsedMs += updateIntervalMs;
+
+        if (mounted) {
+          setState(() {
+            _holdTimeRemaining = (holdDurationMs - elapsedMs).clamp(
+              0,
+              holdDurationMs,
+            );
+          });
+        }
+
+        if (elapsedMs >= holdDurationMs) {
+          timer.cancel();
+          _poseHoldTimer = null;
+
+          _log.d('[REG] Pose hold timer completed - processing embedding');
+
+          if (mounted) {
+            setState(() {
+              _isHoldingPose = false;
+              _holdTimeRemaining = 0;
+            });
+          }
+
+          // Process embedding for held frame
+          if (frontFace != null) {
+            _processHeldFrameEmbedding();
+          }
+        }
+      },
+    );
+  }
+
+  /// Process embedding from the frame held during 1.5s timer
+  Future<void> _processHeldFrameEmbedding() async {
+    if (!recognizer.isReady) {
+      _log.w('[REG] Recognizer not ready for embedding processing');
+      getEmb = false;
+      return;
+    }
+
+    try {
+      _log.d('[REG] Processing held frame embedding for step $_currentStep');
+
+      // We don't have the Face object anymore, so create a dummy one
+      // The embedding from the held frame is what matters
+      final dummyRect = Rect.fromLTWH(
+        0,
+        0,
+        frontFace!.width.toDouble(),
+        frontFace!.height.toDouble(),
+      );
+
+      final img.Image resizedFace = img.copyResize(
+        frontFace!,
+        width: 112,
+        height: 112,
+      );
+      final Uint8List faceBytes = Util.imageToRgbBytes(resizedFace);
+
+      Recognition recognition = recognizer.recognizeCropped(
+        faceBytes,
+        dummyRect,
+      );
+
+      if (recognition.name.startsWith('__')) {
+        _log.d('[REG] Skipping sentinel result: ${recognition.name}');
+        getEmb = false;
+        return;
+      }
+
+      if (recognition.score == -2) {
+        _log.w('[REG] NaN embedding for step $_currentStep');
+        getEmb = false;
+        return;
+      }
+
+      final bool embValid = recognition.embeddings.any((v) => v != 0.0);
+      if (!embValid) {
+        _log.w('[REG] Embedding is all zeros - model inference failed');
+      }
+
+      embeddings.add(recognition.embeddings);
+      _log.d(
+        '[REG] Captured embedding ${embeddings.length}/${faceAngles.length} for step $_currentStep (${faceAngles[_currentStep]}) | emb[0]=${recognition.embeddings[0].toStringAsFixed(4)}',
+      );
+
+      // Move to next step
+      if (mounted) {
+        setState(() {
+          if (_currentStep < faceAngles.length - 1) {
+            _currentStep++;
+          } else {
+            // All poses captured
+            if (!dialogShown) {
+              showFaceRegistrationDialogue(frontFace!);
+            }
+          }
+          getEmb = false;
+        });
+      }
+    } catch (e, st) {
+      _log.e('[REG] Error processing held frame embedding', e, st);
+      getEmb = false;
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
   void performFaceRecognition(Face face, img.Image cropped) async {
     // Check recognizer.isReady directly — do NOT rely on _recognizerReady cache
     // because initState() calls _initRecognizer() async without await, creating
@@ -456,8 +551,15 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         frontFace = cropped;
       }
 
-      Recognition recognition = recognizer.recognizeCropped(
+      final img.Image resizedFace = img.copyResize(
         cropped,
+        width: 112,
+        height: 112,
+      );
+      final Uint8List faceBytes = Util.imageToRgbBytes(resizedFace);
+
+      Recognition recognition = recognizer.recognizeCropped(
+        faceBytes,
         face.boundingBox,
       );
 
@@ -785,9 +887,6 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
         camDirec = CameraLensDirection.back;
       }
 
-      _skipFrameCount = 0;
-      _lastProcessedTime = null;
-
       setState(() {});
       await initializeCamera();
     } catch (e) {
@@ -912,6 +1011,42 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                                   : Colors.grey[300],
                         ),
                       ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Loading indicator overlay during pose hold
+    if (_isHoldingPose) {
+      stackChildren.add(
+        Positioned.fill(
+          child: Container(
+            color: Colors.black.withValues(alpha: 0.5),
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const SizedBox(
+                    width: 80,
+                    height: 80,
+                    child: CircularProgressIndicator(
+                      valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                      strokeWidth: 4,
+                    ),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    'Menangkap embedding...\n${(_holdTimeRemaining / 1000).toStringAsFixed(1)}s',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                 ],

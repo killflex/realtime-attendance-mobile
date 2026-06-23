@@ -23,9 +23,11 @@ Future<void> setupLocator() async {
   );
   getIt.registerLazySingleton<FaceDetector>(() {
     final options = FaceDetectorOptions(
-      performanceMode: FaceDetectorMode.accurate,
-      minFaceSize: 0.15,
+      enableClassification: false,
+      enableLandmarks: false,
       enableTracking: true,
+      minFaceSize: 0.15,
+      performanceMode: FaceDetectorMode.fast,
     );
 
     return FaceDetector(options: options);
