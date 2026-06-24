@@ -44,6 +44,10 @@ android {
         }
     }
 
+    aaptOptions {
+        noCompress("tflite", "lite")
+    }
+
 }
 
 flutter {

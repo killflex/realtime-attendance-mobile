@@ -43,7 +43,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   // Declare face recognizer
   late Recognizer recognizer;
   bool _recognizerReady = false;
-  Future<void>? _recognizerInit;
+  bool _isModelLoading = true; // show loading state while recognizer boots
 
 
   static const int _minFaceSizePx = 60;
@@ -84,6 +84,7 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
   // Timer control for 1.5 second pose hold
   Timer? _poseHoldTimer;
   bool _isHoldingPose = false;
+  bool _isProcessingEmbedding = false; // guard against re-entrant calls
   int _holdTimeRemaining = 0; // ms
 
   @override
@@ -96,39 +97,50 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
     // Initialize face detector
     faceDetector = getIt<FaceDetector>();
 
-    // Initialize face recognizer
-    _recognizerInit = _initRecognizer();
-
-    // Start camera immediately (no form step)
-    initializeCamera();
+    // Initialize face recognizer first, then camera.
+    // This prevents the 1.5s pose hold from firing before the model is ready.
+    _initRecognizer().then((_) {
+      if (mounted) initializeCamera();
+    });
   }
 
   Future<void> _initRecognizer() async {
-    _log.d('[REG] _initRecognizer: start');
-    try {
-      recognizer = getIt<Recognizer>();
-      _log.d(
-        '[REG] _initRecognizer: Recognizer object created, calling init()...',
-      );
-      await recognizer.init();
-      _log.d(
-        '[REG] _initRecognizer: init() complete. isReady=${recognizer.isReady}',
-      );
-      if (!mounted) {
-        _log.d(
-          '[REG] _initRecognizer: widget not mounted after init - skipping setState',
-        );
-        return;
+    // ignore: avoid_print
+    print('[REG] _initRecognizer: START');
+    recognizer = getIt<Recognizer>();
+
+    // Up to 3 attempts with an increasing delay between each.
+    // This handles transient failures (e.g., GpuDelegate rejected on first try)
+    // and ensures the model is genuinely loaded before the camera starts.
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      // ignore: avoid_print
+      print('[REG] _initRecognizer: attempt $attempt — isReady=${recognizer.isReady}');
+      try {
+        await recognizer.init();
+      } catch (e, st) {
+        // ignore: avoid_print
+        print('[REG] _initRecognizer: attempt $attempt threw: $e');
+        _log.e('[REG] _initRecognizer attempt $attempt error', e, st);
       }
-      setState(() {
-        _recognizerReady = recognizer.isReady;
-      });
-      _log.d(
-        '[REG] _initRecognizer: _recognizerReady set to $_recognizerReady',
-      );
-    } catch (e, st) {
-      _log.e('[REG] _initRecognizer error', e, st);
+
+      // ignore: avoid_print
+      print('[REG] _initRecognizer: after attempt $attempt — isReady=${recognizer.isReady}');
+
+      if (recognizer.isReady) break;
+
+      // Wait before retrying to give the OS time to recover
+      await Future.delayed(Duration(milliseconds: 300 * attempt));
     }
+
+    // ignore: avoid_print
+    print('[REG] _initRecognizer: DONE — isReady=${recognizer.isReady}');
+    _log.d('[REG] _initRecognizer complete: isReady=${recognizer.isReady}');
+
+    if (!mounted) return;
+    setState(() {
+      _recognizerReady = recognizer.isReady;
+      _isModelLoading = false;
+    });
   }
 
   void _initializeCameraDescription() {
@@ -428,16 +440,14 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
           _log.d('[REG] Pose hold timer completed - processing embedding');
 
-          if (mounted) {
-            setState(() {
-              _isHoldingPose = false;
-              _holdTimeRemaining = 0;
-            });
-          }
-
-          // Process embedding for held frame
-          if (frontFace != null) {
+          // DO NOT reset _isHoldingPose here — keep it true while
+          // _processHeldFrameEmbedding runs to block new captures.
+          if (mounted && frontFace != null) {
             _processHeldFrameEmbedding();
+          } else {
+            // Nothing to process, clean up.
+            if (mounted) setState(() { _isHoldingPose = false; _holdTimeRemaining = 0; });
+            getEmb = false;
           }
         }
       },
@@ -446,197 +456,128 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
 
   /// Process embedding from the frame held during 1.5s timer
   Future<void> _processHeldFrameEmbedding() async {
-    if (!recognizer.isReady) {
-      _log.w('[REG] Recognizer not ready for embedding processing');
-      getEmb = false;
+    // Guard against re-entrant calls (e.g. timer fires twice or widget rebuilds)
+    if (_isProcessingEmbedding) {
+      _log.w('[REG] _processHeldFrameEmbedding called while already processing — skipping');
       return;
+    }
+    _isProcessingEmbedding = true;
+
+    // If the recognizer isn't ready yet, WAIT for it instead of silently
+    // resetting and allowing the camera to loop infinitely.
+    if (!recognizer.isReady) {
+      _log.w('[REG] Recognizer not ready — waiting for init...');
+      await recognizer.init();
+      if (!recognizer.isReady) {
+        _log.e('[REG] Recognizer still not ready after init. Aborting step.');
+        _isProcessingEmbedding = false;
+        if (mounted) {
+          setState(() { _isHoldingPose = false; _holdTimeRemaining = 0; getEmb = false; });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Model AI belum siap. Coba lagi atau restart aplikasi.'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 3),
+            ),
+          );
+        }
+        return;
+      }
     }
 
     try {
       _log.d('[REG] Processing held frame embedding for step $_currentStep');
 
-      // We don't have the Face object anymore, so create a dummy one
-      // The embedding from the held frame is what matters
       final dummyRect = Rect.fromLTWH(
-        0,
-        0,
+        0, 0,
         frontFace!.width.toDouble(),
         frontFace!.height.toDouble(),
       );
 
       final img.Image resizedFace = img.copyResize(
-        frontFace!,
-        width: 112,
-        height: 112,
+        frontFace!, width: 112, height: 112,
       );
       final Uint8List faceBytes = Util.imageToRgbBytes(resizedFace);
 
-      Recognition recognition = recognizer.recognizeCropped(
-        faceBytes,
-        dummyRect,
-      );
+      Recognition recognition = recognizer.recognizeCropped(faceBytes, dummyRect);
 
-      if (recognition.name.startsWith('__')) {
-        _log.d('[REG] Skipping sentinel result: ${recognition.name}');
-        getEmb = false;
+      // __busy__: the model is running concurrently — retry on next frame
+      if (recognition.name == '__busy__') {
+        _log.d('[REG] Model busy, will retry next valid frame');
+        _isProcessingEmbedding = false;
+        if (mounted) setState(() { _isHoldingPose = false; _holdTimeRemaining = 0; getEmb = false; });
         return;
       }
 
-      if (recognition.score == -2) {
-        _log.w('[REG] NaN embedding for step $_currentStep');
-        getEmb = false;
+      // Any other sentinel (including __not_ready__, __invalid__) means the
+      // crop itself is bad. Show a snackbar and allow retry.
+      if (recognition.name.startsWith('__')) {
+        _log.w('[REG] Sentinel result for step $_currentStep: ${recognition.name} — retrying');
+        _isProcessingEmbedding = false;
+        if (mounted) {
+          setState(() { _isHoldingPose = false; _holdTimeRemaining = 0; getEmb = false; });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Gagal menangkap wajah (${recognition.name}). Coba posisikan wajah lebih jelas.'),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
         return;
       }
 
       final bool embValid = recognition.embeddings.any((v) => v != 0.0);
       if (!embValid) {
-        _log.w('[REG] Embedding is all zeros - model inference failed');
+        _log.w('[REG] Embedding is all zeros — skipping step $_currentStep');
+        _isProcessingEmbedding = false;
+        if (mounted) setState(() { _isHoldingPose = false; _holdTimeRemaining = 0; getEmb = false; });
+        return;
       }
 
       embeddings.add(recognition.embeddings);
       _log.d(
-        '[REG] Captured embedding ${embeddings.length}/${faceAngles.length} for step $_currentStep (${faceAngles[_currentStep]}) | emb[0]=${recognition.embeddings[0].toStringAsFixed(4)}',
+        '[REG] Captured embedding ${embeddings.length}/${faceAngles.length} '
+        'for step $_currentStep (${faceAngles[_currentStep]}) | '
+        'emb[0]=${recognition.embeddings[0].toStringAsFixed(4)}',
       );
 
-      // Move to next step
+      // Advance step — commit state BEFORE releasing guards so the camera
+      // stream sees the new _currentStep before it can re-enter.
+      final bool allDone = (_currentStep >= faceAngles.length - 1);
       if (mounted) {
         setState(() {
-          if (_currentStep < faceAngles.length - 1) {
+          if (!allDone) {
             _currentStep++;
-          } else {
-            // All poses captured
-            if (!dialogShown) {
-              showFaceRegistrationDialogue(frontFace!);
-            }
           }
+          _isHoldingPose = false;
+          _holdTimeRemaining = 0;
           getEmb = false;
         });
+      }
+
+      // Show final dialog AFTER setState, outside setState callback.
+      if (allDone && mounted && !dialogShown) {
+        showFaceRegistrationDialogue(frontFace!);
       }
     } catch (e, st) {
       _log.e('[REG] Error processing held frame embedding', e, st);
-      getEmb = false;
-      if (mounted) {
-        setState(() {});
-      }
-    }
-  }
-
-  void performFaceRecognition(Face face, img.Image cropped) async {
-    // Check recognizer.isReady directly — do NOT rely on _recognizerReady cache
-    // because initState() calls _initRecognizer() async without await, creating
-    // a race condition where setState may not have fired yet.
-    _log.d(
-      '[REG] performFaceRecognition: isReady=${recognizer.isReady}, _recognizerReady=$_recognizerReady',
-    );
-    if (!recognizer.isReady) {
-      _log.w('[REG] Recognizer not ready - awaiting initialization');
-      await _recognizerInit;
-      if (!recognizer.isReady) {
-        _log.w('[REG] Recognizer still not ready after init. Aborting.');
-        isBusy = false;
-        getEmb = false;
-        return;
-      }
-    }
-    // Sync the state flag if it was stale
-    if (!_recognizerReady && mounted) {
-      setState(() => _recognizerReady = true);
-    }
-
-    try {
-      recognitions.clear();
-
-      // Store the first face (straight) as the profile image
-      if (_currentStep == 0) {
-        frontFace = cropped;
-      }
-
-      final img.Image resizedFace = img.copyResize(
-        cropped,
-        width: 112,
-        height: 112,
-      );
-      final Uint8List faceBytes = Util.imageToRgbBytes(resizedFace);
-
-      Recognition recognition = recognizer.recognizeCropped(
-        faceBytes,
-        face.boundingBox,
-      );
-
-      if (recognition.name.startsWith('__')) {
-        _log.d('[REG] Skipping sentinel result: ${recognition.name}');
-        if (mounted) {
-          setState(() {
-            isBusy = false;
-            getEmb = false;
-          });
-        } else {
-          isBusy = false;
-          getEmb = false;
-        }
-        return;
-      }
-
-      // NaN guard: jika model menghasilkan NaN, coba frame berikutnya
-      if (recognition.score == -2) {
-        _log.w(
-          '[REG] NaN embedding for step $_currentStep - retrying next frame',
-        );
-        if (mounted) {
-          setState(() {
-            isBusy = false;
-            getEmb = false;
-          });
-        } else {
-          isBusy = false;
-          getEmb = false;
-        }
-        return;
-      }
-
-      // Guard: if embedding is all zeros, model failed silently
-      final bool embValid = recognition.embeddings.any((v) => v != 0.0);
-      if (!embValid) {
-        _log.w(
-          '[REG] Embedding is all zeros - model inference may have failed',
-        );
-      }
-
-      embeddings.add(recognition.embeddings);
-      _log.d(
-        '[REG] Captured embedding ${embeddings.length}/${faceAngles.length} for step $_currentStep (${faceAngles[_currentStep]}) | emb[0]=${recognition.embeddings[0].toStringAsFixed(4)}',
-      );
-
-      if (!mounted) {
-        getEmb = false;
-        return;
-      }
-
-      setState(() {
-        if (_currentStep < faceAngles.length - 1) {
-          _currentStep++;
-        } else {
-          if (!dialogShown) {
-            showFaceRegistrationDialogue(frontFace!);
-          }
-        }
-        isBusy = false;
-        getEmb = false;
-      });
-    } catch (e, st) {
-      // CRITICAL: always reset getEmb so subsequent frames are not permanently blocked
-      _log.e('[REG] performFaceRecognition error', e, st);
       if (mounted) {
         setState(() {
-          isBusy = false;
+          _isHoldingPose = false;
+          _holdTimeRemaining = 0;
           getEmb = false;
         });
       } else {
-        isBusy = false;
         getEmb = false;
       }
+    } finally {
+      _isProcessingEmbedding = false;
     }
   }
+
+
+
 
   //TODO Face Registration Dialogue
   TextEditingController textEditingController = TextEditingController();
@@ -1044,6 +985,35 @@ class _RegistrationScreenState extends State<RegistrationScreen> {
                     'Menangkap embedding...\n${(_holdTimeRemaining / 1000).toStringAsFixed(1)}s',
                     textAlign: TextAlign.center,
                     style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    // Loading indicator overlay while model boots
+    if (_isModelLoading) {
+      stackChildren.add(
+        Positioned.fill(
+          child: Container(
+            color: Colors.black.withValues(alpha: 0.8),
+            child: const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircularProgressIndicator(color: Colors.white),
+                  SizedBox(height: 20),
+                  Text(
+                    'Menyiapkan Model AI...',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
                       color: Colors.white,
                       fontSize: 16,
                       fontWeight: FontWeight.w600,

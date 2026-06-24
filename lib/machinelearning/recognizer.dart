@@ -1,6 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -24,14 +22,18 @@ class Recognizer {
   final FaceRepository _faceRepository;
   final AppLogger _log = AppLogger();
 
-  // Set to true to force CPU inference and test performance difference (A/B testing)
-  bool forceCpuOnly = false;
+  // CPU-only execution inside background isolates is highly performant and extremely stable
+  bool forceCpuOnly = true;
+  int numThreads = 4;
+
+  // OPTIMIZATION: Pre-allocate reusable buffer to avoid recreating 
+  // 37,632 floats per frame and triggering heavy Dart GC during normalization.
+  late final Float32List _sharedInputBuffer;
 
   Map<String, List<List<double>>> registered = {};
 
-  // Model yang sedang digunakan.
-  // Ganti path ini jika ingin memakai Dynamic Range atau Float16.
-  String get modelName => 'assets/mobilefacenet_dynamic_range.tflite';
+  // Default to the highly performant Baseline Float32 model with zero dynamic dequantization overhead
+  String modelName = 'assets/mobilefacenet_baseline_f32.tflite';
 
   bool _isLoaded = false;
   bool _isRunning = false;
@@ -44,13 +46,22 @@ class Recognizer {
     _interpreterOptions = InterpreterOptions();
 
     if (numThreads != null) {
-      _interpreterOptions.threads = numThreads;
+      this.numThreads = numThreads;
     }
+    _interpreterOptions.threads = this.numThreads;
+    _sharedInputBuffer = Float32List(inputWidth * inputHeight * 3);
   }
 
   Future<void> init() async {
+    // Always allow re-init if the model is not ready.
+    // This handles cases where a previous init attempt failed silently
+    // (e.g., GpuDelegate exception that was caught internally).
+    if (!isReady) {
+      // ignore: avoid_print
+      print('[Recognizer] init() called but isReady=false — resetting and retrying.');
+      _initFuture = null;
+    }
     _initFuture ??= _initInternal();
-
     return _initFuture!;
   }
 
@@ -136,64 +147,71 @@ class Recognizer {
   }
 
   Future<void> loadModel() async {
-    try {
-      final options = InterpreterOptions()..threads = 4;
+    // Reset state at the start so a previous successful load
+    // doesn't mask a new failure.
+    _isLoaded = false;
+    // ignore: avoid_print
+    print('[Recognizer] loadModel() START — model=$modelName forceCpuOnly=$forceCpuOnly threads=$numThreads');
 
+    // --- Attempt 1: load with configured options (CPU threads or GPU) ---
+    try {
+      final options = InterpreterOptions();
       if (!forceCpuOnly) {
-        _log.i('Loading model: $modelName with Platform-specific GPU Delegate');
-        if (Platform.isAndroid) {
-          options.addDelegate(GpuDelegateV2(
-            options: GpuDelegateOptionsV2(
-              isPrecisionLossAllowed: true,
-              inferencePreference: TfLiteGpuInferenceUsage.fastSingleAnswer,
-              inferencePriority1: TfLiteGpuInferencePriority.minLatency,
-            ),
-          ));
-        } else if (Platform.isIOS) {
-          options.addDelegate(GpuDelegate(
-            options: GpuDelegateOptions(
-              allowPrecisionLoss: true,
-              waitType: TFLGpuDelegateWaitType.aggressive,
-            ),
-          ));
-        }
+        // ignore: avoid_print
+        print('[Recognizer] Attempting load with GPU Delegate...');
+        options.addDelegate(GpuDelegate());
       } else {
-        _log.i('Loading model: $modelName with CPU Only (A/B testing)');
+        // ignore: avoid_print
+        print('[Recognizer] Attempting load with CPU ($numThreads threads)...');
+        options.threads = numThreads;
+      }
+
+      if (_interpreter != null) {
+        _interpreter!.close();
+        _interpreter = null;
       }
 
       _interpreter = await Interpreter.fromAsset(modelName, options: options);
-
       _isLoaded = true;
+      // ignore: avoid_print
+      print('[Recognizer] Model loaded successfully (attempt 1).');
       _log.i(
-        'Model loaded successfully${forceCpuOnly ? " (CPU Only)" : " with GPU Delegate"}. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
+        'Model loaded successfully. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
       );
     } catch (e, st) {
-      _log.w(
-        'Failed to load model with GPU Delegate. Falling back to CPU.',
-        e,
-        st,
-      );
-      try {
-        // Fallback ke CPU jika GPU gagal
-        _interpreter = await Interpreter.fromAsset(
-          modelName,
-          options: _interpreterOptions,
-        );
+      // ignore: avoid_print
+      print('[Recognizer] Attempt 1 FAILED: $e');
+      _log.w('Failed to load model with custom options. Falling back to bare CPU.', e, st);
 
+      // --- Attempt 2: bare CPU fallback with no delegates or thread count ---
+      try {
+        if (_interpreter != null) {
+          _interpreter!.close();
+          _interpreter = null;
+        }
+        // ignore: avoid_print
+        print('[Recognizer] Attempting load with bare CPU (no options)...');
+        _interpreter = await Interpreter.fromAsset(modelName);
         _isLoaded = true;
+        // ignore: avoid_print
+        print('[Recognizer] Model loaded successfully via bare CPU fallback.');
         _log.i(
-          'Model loaded successfully on CPU fallback. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
+          'Model loaded via CPU fallback. Input: ${_interpreter!.getInputTensors().map((t) => t.shape)}, Output: ${_interpreter!.getOutputTensors().map((t) => t.shape)}',
         );
       } catch (e2, st2) {
         _isLoaded = false;
-        _log.e('Failed to load model on CPU fallback.', e2, st2);
+        _interpreter = null;
+        // ignore: avoid_print
+        print('[Recognizer] CRITICAL: Both load attempts FAILED. e=$e2');
+        _log.e('Failed to load model even on bare CPU fallback.', e2, st2);
       }
     }
 
+    // ignore: avoid_print
+    print('[Recognizer] loadModel() END — _isLoaded=$_isLoaded, _interpreter=${_interpreter != null}');
+
     if (_isLoaded) {
-      _log.i(
-        'Cosine threshold for current model: ${cosineThreshold.toStringAsFixed(6)}',
-      );
+      _log.i('Cosine threshold: ${cosineThreshold.toStringAsFixed(6)}');
     }
   }
 
@@ -389,11 +407,10 @@ class Recognizer {
   }
 
   List<dynamic> rgbBytesToArray(Uint8List rgbBytes) {
-    final Float32List inputBuffer = Float32List(inputWidth * inputHeight * 3);
     for (int i = 0; i < rgbBytes.length; i++) {
-      inputBuffer[i] = (rgbBytes[i] - 127.5) / 127.5;
+      _sharedInputBuffer[i] = (rgbBytes[i] - 127.5) / 127.5;
     }
-    return inputBuffer.reshape([1, inputHeight, inputWidth, 3]);
+    return _sharedInputBuffer.reshape([1, inputHeight, inputWidth, 3]);
   }
 
   Recognition recognizeCropped(Uint8List croppedFaceBytes, Rect location) {
@@ -420,21 +437,24 @@ class Recognizer {
     _isRunning = true;
 
     List<double> outputArray;
-    int run;
+    double prepMs = 0.0;
+    double inferMs = 0.0;
 
     try {
+      final sTensor = Stopwatch()..start();
       final input = rgbBytesToArray(croppedFaceBytes);
+      sTensor.stop();
+      prepMs = sTensor.elapsedMicroseconds / 1000.0;
 
       _log.d('Input shape: ${input.shape}');
 
       // Output buffer harus List<List<double>>.
       final List<List<double>> output = [List.filled(outputSize, 0.0)];
 
-      final int runs = DateTime.now().millisecondsSinceEpoch;
-
+      final sInfer = Stopwatch()..start();
       _interpreter!.run(input, output);
-
-      run = DateTime.now().millisecondsSinceEpoch - runs;
+      sInfer.stop();
+      inferMs = sInfer.elapsedMicroseconds / 1000.0;
 
       // Normalisasi defensif output embedding.
       outputArray = l2Normalize(output[0]);
@@ -457,7 +477,7 @@ class Recognizer {
     }
 
     _log.d(
-      'Inference time: ${run}ms | embedding[0..4]: ${outputArray.sublist(0, 4).map((v) => v.toStringAsFixed(4))}',
+      'Inference time: ${inferMs.toStringAsFixed(2)}ms | embedding[0..4]: ${outputArray.sublist(0, 4).map((v) => v.toStringAsFixed(4))}',
     );
 
     // Cari identity dengan cosine similarity tertinggi.
@@ -467,9 +487,15 @@ class Recognizer {
       'Best match: ${pair.name} | cosine similarity: ${pair.score.toStringAsFixed(6)} | threshold: ${cosineThreshold.toStringAsFixed(6)}',
     );
 
-    // Catatan:
-    // Recognition field terakhir sekarang menyimpan cosine similarity.
-    return Recognition(pair.name, location, outputArray, pair.score);
+    final Recognition recognition = Recognition(
+      pair.name,
+      location,
+      outputArray,
+      pair.score,
+    );
+    recognition.prepMs = prepMs;
+    recognition.inferMs = inferMs;
+    return recognition;
   }
 
   Recognition recognize(img.Image image, Rect location) {
@@ -555,9 +581,6 @@ class Recognizer {
   // FIND NEAREST — COSINE SIMILARITY
   // ============================================================
   //
-  // Sebelumnya fungsi ini memakai Euclidean distance.
-  // Sekarang diganti menjadi cosine similarity.
-  //
   // Rule:
   //   similarity >= cosineThreshold → wajah sama
   //   similarity < cosineThreshold  → Unknown
@@ -610,7 +633,6 @@ class Recognizer {
 class Pair {
   String name;
 
-  // Sekarang field ini menyimpan cosine similarity, bukan distance.
   double score;
 
   Pair(this.name, this.score);
@@ -624,91 +646,147 @@ class Pair {
 // Digunakan untuk pengujian performa model tanpa I/O.
 //
 class PerformanceTracker {
-  late Stopwatch _frameStopwatch;
-  List<int> latencies = []; // Latency per frame (ms)
-  List<double> instantFpsList = []; // FPS per detik
+  final List<double> preLatencies = [];
+  final List<double> inferLatencies = [];
+  final List<double> postLatencies = [];
+  final List<double> totalLatencies = [];
+  final List<double> fpsValues = [];
+
   DateTime? _lastSecondMark;
   int _framesThisSecond = 0;
+  int totalFramesLogged = 0;
 
   PerformanceTracker() {
-    _frameStopwatch = Stopwatch();
     _lastSecondMark = DateTime.now();
   }
 
-  /// Start measuring latency untuk frame saat ini.
-  void startFrameMeasure() {
-    _frameStopwatch.reset();
-    _frameStopwatch.start();
-  }
-
-  /// Stop measuring dan simpan latency. Update FPS counter.
-  void stopFrameMeasure() {
-    _frameStopwatch.stop();
-    latencies.add(_frameStopwatch.elapsedMilliseconds);
+  void addFrameMetrics({
+    required double preMs,
+    required double inferMs,
+    required double postMs,
+    required double totalMs,
+  }) {
+    preLatencies.add(preMs);
+    inferLatencies.add(inferMs);
+    postLatencies.add(postMs);
+    totalLatencies.add(totalMs);
     _framesThisSecond++;
+    totalFramesLogged++;
 
     final now = DateTime.now();
     if (now.difference(_lastSecondMark!).inMilliseconds >= 1000) {
-      instantFpsList.add(_framesThisSecond.toDouble());
+      fpsValues.add(_framesThisSecond.toDouble());
       _framesThisSecond = 0;
       _lastSecondMark = now;
+
+      // Print a publication-ready summary every 100 frames to make copy-pasting easy
+      if (totalFramesLogged % 100 == 0) {
+        printSummaryToConsole();
+      }
     }
   }
 
-  /// Reset tracker (untuk memulai test session baru).
   void reset() {
-    latencies.clear();
-    instantFpsList.clear();
+    preLatencies.clear();
+    inferLatencies.clear();
+    postLatencies.clear();
+    totalLatencies.clear();
+    fpsValues.clear();
     _framesThisSecond = 0;
+    totalFramesLogged = 0;
     _lastSecondMark = DateTime.now();
   }
 
-  /// Hitung statistik akhir dalam format JSON.
-  String getStatsAsJson() {
-    if (latencies.isEmpty) {
-      return jsonEncode({'error': 'No data collected'});
-    }
-
-    // Latency stats
-    final meanLatency = latencies.reduce((a, b) => a + b) / latencies.length;
-    final maxLatency = latencies.reduce((a, b) => a > b ? a : b);
-    final minLatency = latencies.reduce((a, b) => a < b ? a : b);
-
-    // FPS stats
-    double meanFps = 0.0;
-    double maxFps = 0.0;
-    double minFps = double.infinity;
-
-    if (instantFpsList.isNotEmpty) {
-      meanFps = instantFpsList.reduce((a, b) => a + b) / instantFpsList.length;
-      maxFps = instantFpsList.reduce((a, b) => a > b ? a : b);
-      minFps = instantFpsList.reduce((a, b) => a < b ? a : b);
-    }
-
-    final stats = {
-      'total_frames': latencies.length,
-      'latency_ms': {
-        'mean': double.parse(meanLatency.toStringAsFixed(2)),
-        'max': maxLatency,
-        'min': minLatency,
-      },
-      'fps': {
-        'mean': double.parse(meanFps.toStringAsFixed(2)),
-        'max': double.parse(maxFps.toStringAsFixed(2)),
-        'min': double.parse(minFps.toStringAsFixed(2)),
-      },
-    };
-
-    return jsonEncode(stats);
+  double calculateMean(List<double> values) {
+    if (values.isEmpty) return 0.0;
+    return values.reduce((a, b) => a + b) / values.length;
   }
 
-  /// Get current moving average FPS (last instant FPS value).
-  double get currentInstantFps =>
-      instantFpsList.isEmpty ? 0.0 : instantFpsList.last;
+  double calculateStdDev(List<double> values, double mean) {
+    if (values.length <= 1) return 0.0;
+    final variance =
+        values.map((v) => (v - mean) * (v - mean)).reduce((a, b) => a + b) /
+        (values.length - 1);
+    return sqrt(variance);
+  }
 
-  /// Get current average latency (mean of all latencies).
-  double get currentAverageLatency =>
-      latencies.isEmpty
-          ? 0.0
-          : latencies.reduce((a, b) => a + b) / latencies.length;
+  double calculatePercentile(List<double> values, double percentile) {
+    if (values.isEmpty) return 0.0;
+    final sorted = List<double>.from(values)..sort();
+    final index = ((sorted.length - 1) * percentile).round();
+    return sorted[index];
+  }
+
+  void printSummaryToConsole() {
+    if (totalLatencies.isEmpty) return;
+
+    final meanPre = calculateMean(preLatencies);
+    final stdPre = calculateStdDev(preLatencies, meanPre);
+    final minPre = preLatencies.reduce((a, b) => a < b ? a : b);
+    final maxPre = preLatencies.reduce((a, b) => a > b ? a : b);
+    final p95Pre = calculatePercentile(preLatencies, 0.95);
+
+    final meanInfer = calculateMean(inferLatencies);
+    final stdInfer = calculateStdDev(inferLatencies, meanInfer);
+    final minInfer = inferLatencies.reduce((a, b) => a < b ? a : b);
+    final maxInfer = inferLatencies.reduce((a, b) => a > b ? a : b);
+    final p95Infer = calculatePercentile(inferLatencies, 0.95);
+
+    final meanPost = calculateMean(postLatencies);
+    final stdPost = calculateStdDev(postLatencies, meanPost);
+    final minPost = postLatencies.reduce((a, b) => a < b ? a : b);
+    final maxPost = postLatencies.reduce((a, b) => a > b ? a : b);
+    final p95Post = calculatePercentile(postLatencies, 0.95);
+
+    final meanTotal = calculateMean(totalLatencies);
+    final stdTotal = calculateStdDev(totalLatencies, meanTotal);
+    final minTotal = totalLatencies.reduce((a, b) => a < b ? a : b);
+    final maxTotal = totalLatencies.reduce((a, b) => a > b ? a : b);
+    final p95Total = calculatePercentile(totalLatencies, 0.95);
+
+    final meanFps = calculateMean(fpsValues);
+    final stdFps = calculateStdDev(fpsValues, meanFps);
+
+    // ignore: avoid_print
+    print('\n${'═' * 80}');
+    // ignore: avoid_print
+    print(
+      '🔬 RESEARCH DATA TELEMETRY SUMMARY (Frames Analyzed: $totalFramesLogged)',
+    );
+    // ignore: avoid_print
+    print('═' * 80);
+    // ignore: avoid_print
+    print(
+      'Metric               | Mean ± StdDev (ms)   | Min (ms) | Max (ms) | p95 (ms)',
+    );
+    // ignore: avoid_print
+    print('─' * 80);
+    // ignore: avoid_print
+    print(
+      '1. Preprocess (T_pre)| ${meanPre.toStringAsFixed(2).padLeft(6)} ± ${stdPre.toStringAsFixed(2).padRight(5)}      | ${minPre.toStringAsFixed(1).padLeft(8)} | ${maxPre.toStringAsFixed(1).padLeft(8)} | ${p95Pre.toStringAsFixed(1).padLeft(8)}',
+    );
+    // ignore: avoid_print
+    print(
+      '2. Inference (T_infer)  | ${meanInfer.toStringAsFixed(2).padLeft(6)} ± ${stdInfer.toStringAsFixed(2).padRight(5)}      | ${minInfer.toStringAsFixed(1).padLeft(8)} | ${maxInfer.toStringAsFixed(1).padLeft(8)} | ${p95Infer.toStringAsFixed(1).padLeft(8)}',
+    );
+    // ignore: avoid_print
+    print(
+      '3. Postprocess (T_post) | ${meanPost.toStringAsFixed(2).padLeft(6)} ± ${stdPost.toStringAsFixed(2).padRight(5)}      | ${minPost.toStringAsFixed(1).padLeft(8)} | ${maxPost.toStringAsFixed(1).padLeft(8)} | ${p95Post.toStringAsFixed(1).padLeft(8)}',
+    );
+    // ignore: avoid_print
+    print(
+      '4. Total Pipeline       | ${meanTotal.toStringAsFixed(2).padLeft(6)} ± ${stdTotal.toStringAsFixed(2).padRight(5)}      | ${minTotal.toStringAsFixed(1).padLeft(8)} | ${maxTotal.toStringAsFixed(1).padLeft(8)} | ${p95Total.toStringAsFixed(1).padLeft(8)}',
+    );
+    // ignore: avoid_print
+    print('─' * 80);
+    // ignore: avoid_print
+    print(
+      'System Throughput       | ${meanFps.toStringAsFixed(2)} ± ${stdFps.toStringAsFixed(2)} FPS',
+    );
+    // ignore: avoid_print
+    print('${'═' * 80}\n');
+  }
+
+  double get currentInstantFps => fpsValues.isEmpty ? 0.0 : fpsValues.last;
+  double get currentAverageLatency => calculateMean(totalLatencies);
 }

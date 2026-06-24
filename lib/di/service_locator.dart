@@ -19,7 +19,7 @@ Future<void> setupLocator() async {
     () => FaceRepository(dbHelper: getIt<DatabaseHelper>()),
   );
   getIt.registerLazySingleton<Recognizer>(
-    () => Recognizer(faceRepository: getIt<FaceRepository>(), numThreads: 2),
+    () => Recognizer(faceRepository: getIt<FaceRepository>(), numThreads: 4),
   );
   getIt.registerLazySingleton<FaceDetector>(() {
     final options = FaceDetectorOptions(
