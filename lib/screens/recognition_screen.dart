@@ -60,6 +60,11 @@ class _RecognitionScreenState extends State<RecognitionScreen>
   DateTime? _lastFpsMark;
   int _fpsFrames = 0;
   int _totalFramesReceived = 0;
+  
+  // Camera stream FPS tracking
+  int _cameraFpsFrames = 0;
+  DateTime? _lastCameraFpsMark;
+  double _cameraFps = 0.0;
 
   // Background Isolate for Face Recognition
   Isolate? _recognitionIsolate;
@@ -173,6 +178,20 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       setState(() {});
 
       controller!.startImageStream((image) {
+        // Track raw camera feed FPS
+        _cameraFpsFrames++;
+        final now = DateTime.now();
+        _lastCameraFpsMark ??= now;
+        if (now.difference(_lastCameraFpsMark!).inMilliseconds >= 1000) {
+          if (mounted) {
+            setState(() {
+              _cameraFps = _cameraFpsFrames.toDouble();
+            });
+          }
+          _cameraFpsFrames = 0;
+          _lastCameraFpsMark = now;
+        }
+
         if (!isBusy) {
           isBusy = true;
           frame = image;
@@ -1341,7 +1360,16 @@ class _RecognitionScreenState extends State<RecognitionScreen>
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'FPS: ${_displayFps.toStringAsFixed(1)}',
+                    'Cam FPS: ${_cameraFps.toStringAsFixed(1)}',
+                    style: const TextStyle(
+                      color: Colors.green,
+                      fontSize: 11,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'AI FPS : ${_displayFps.toStringAsFixed(1)}',
                     style: const TextStyle(
                       color: Colors.green,
                       fontSize: 11,
