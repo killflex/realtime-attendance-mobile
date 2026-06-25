@@ -228,9 +228,9 @@ class _RecognitionScreenState extends State<RecognitionScreen>
 
   Future<void> doFaceDetectionOnFrame() async {
     _totalFramesReceived++;
-    if (_totalFramesReceived % 60 == 0) {
-      _log.i('Received frame #$_totalFramesReceived. isBusy=$isBusy, frameSize=${frame?.width}x${frame?.height}, format=${frame?.format.raw}');
-    }
+    // if (_totalFramesReceived % 60 == 0) {
+    //   _log.i('Received frame #$_totalFramesReceived. isBusy=$isBusy, frameSize=${frame?.width}x${frame?.height}, format=${frame?.format.raw}');
+    // }
     try {
       final sTotal = Stopwatch()..start();
 
@@ -252,7 +252,7 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       final sDetect = Stopwatch()..start();
       final faces = await faceDetector.processImage(inputImage);
       sDetect.stop();
-      _log.d('Detected faces: ${faces.length}');
+      // _log.d('Detected faces: ${faces.length}');
 
       final double detectMs = sDetect.elapsedMicroseconds / 1000.0;
 
@@ -285,8 +285,8 @@ class _RecognitionScreenState extends State<RecognitionScreen>
       }
 
       // ignore: avoid_print
-      print('[Timing Outside] FrameConv: ${sFrameConv.elapsedMilliseconds}ms | FaceDetection: ${detectMs.toStringAsFixed(2)}ms | T_pre: ${finalPrepMs.toStringAsFixed(2)}ms | T_infer: ${finalInferMs.toStringAsFixed(2)}ms | T_post: ${finalPostMs.toStringAsFixed(2)}ms | Total Pipeline: ${finalTotalMs.toStringAsFixed(2)}ms');
-      _log.i('[Timing Outside] FrameConv: ${sFrameConv.elapsedMilliseconds}ms | FaceDetection: ${detectMs.toStringAsFixed(2)}ms | T_pre: ${finalPrepMs.toStringAsFixed(2)}ms | T_infer: ${finalInferMs.toStringAsFixed(2)}ms | T_post: ${finalPostMs.toStringAsFixed(2)}ms | Total Pipeline: ${finalTotalMs.toStringAsFixed(2)}ms');
+      // print('[Timing Outside] FrameConv: ${sFrameConv.elapsedMilliseconds}ms | FaceDetection: ${detectMs.toStringAsFixed(2)}ms | T_pre: ${finalPrepMs.toStringAsFixed(2)}ms | T_infer: ${finalInferMs.toStringAsFixed(2)}ms | T_post: ${finalPostMs.toStringAsFixed(2)}ms | Total Pipeline: ${finalTotalMs.toStringAsFixed(2)}ms');
+      // _log.i('[Timing Outside] FrameConv: ${sFrameConv.elapsedMilliseconds}ms | FaceDetection: ${detectMs.toStringAsFixed(2)}ms | T_pre: ${finalPrepMs.toStringAsFixed(2)}ms | T_infer: ${finalInferMs.toStringAsFixed(2)}ms | T_post: ${finalPostMs.toStringAsFixed(2)}ms | Total Pipeline: ${finalTotalMs.toStringAsFixed(2)}ms');
 
       if (_isRecordingTelemetry && faces.isNotEmpty) {
         _performanceTracker.addFrameMetrics(
@@ -901,9 +901,9 @@ class _RecognitionScreenState extends State<RecognitionScreen>
         final Uint8List croppedFaceBytes = _cropNv21ToRgb(frame!, lsBox);
         sCrop.stop();
 
-        _log.d(
-          '[REC] bbox=${face.boundingBox} cropSize=112x112 (direct RGB extraction)',
-        );
+        // _log.d(
+        //   '[REC] bbox=${face.boundingBox} cropSize=112x112 (direct RGB extraction)',
+        // );
 
         List<double> outputArray;
         double isolateTensorConvMs = 0.0;
@@ -946,8 +946,8 @@ class _RecognitionScreenState extends State<RecognitionScreen>
         final double tPost = postMs;
 
         // ignore: avoid_print
-        print('[Timing Inside performFaceRecognition] CropFace: ${cropFaceMs.toStringAsFixed(2)}ms | IsolateTensorConv: ${isolateTensorConvMs.toStringAsFixed(2)}ms | IsolatePureInference: ${isolatePureInferenceMs.toStringAsFixed(2)}ms | FindNearest: ${postMs.toStringAsFixed(2)}ms');
-        _log.i('[Timing Inside performFaceRecognition] CropFace: ${cropFaceMs.toStringAsFixed(2)}ms | IsolateTensorConv: ${isolateTensorConvMs.toStringAsFixed(2)}ms | IsolatePureInference: ${isolatePureInferenceMs.toStringAsFixed(2)}ms | FindNearest: ${postMs.toStringAsFixed(2)}ms');
+        // print('[Timing Inside performFaceRecognition] CropFace: ${cropFaceMs.toStringAsFixed(2)}ms | IsolateTensorConv: ${isolateTensorConvMs.toStringAsFixed(2)}ms | IsolatePureInference: ${isolatePureInferenceMs.toStringAsFixed(2)}ms | FindNearest: ${postMs.toStringAsFixed(2)}ms');
+        // _log.i('[Timing Inside performFaceRecognition] CropFace: ${cropFaceMs.toStringAsFixed(2)}ms | IsolateTensorConv: ${isolateTensorConvMs.toStringAsFixed(2)}ms | IsolatePureInference: ${isolatePureInferenceMs.toStringAsFixed(2)}ms | FindNearest: ${postMs.toStringAsFixed(2)}ms');
 
         final Recognition recognition = Recognition(
           pair.name,
@@ -959,9 +959,9 @@ class _RecognitionScreenState extends State<RecognitionScreen>
         recognition.inferMs = tInfer;
         recognition.postMs = tPost;
 
-        _log.d(
-          '[REC] name=${recognition.name} score=${recognition.score.toStringAsFixed(3)}',
-        );
+        // _log.d(
+        //   '[REC] name=${recognition.name} score=${recognition.score.toStringAsFixed(3)}',
+        // );
 
         if (!recognition.name.startsWith('__')) {
           final double liveThreshold =
